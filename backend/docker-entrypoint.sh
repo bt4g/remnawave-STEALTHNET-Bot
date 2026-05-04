@@ -1,20 +1,45 @@
 #!/bin/sh
 # Старт API: migrate deploy → node.
-# Если БД «живая», но без истории Prisma Migrate (ошибка P3005), один раз:
-#   0) если нет таблицы public.bots — SQL миграции 20260502160000_clone_bots
-#      (backfill bot_id; без этого migrate diff даёт «голый» скрипт и NOT NULL bot_id)
-#   1) SQL-дрейф из текущей БД к schema.prisma (migrate diff + db execute), если не пуст
-#   2) baseline: migrate resolve --applied для каждой папки (P3008 «уже есть» — пропуск)
-#   3) migrate deploy
 #
-# Важно: шаг diff может содержать деструктивные операции — бэкап перед первым
-# запуском на проде. После появления _prisma_migrations этот блок не вызывается.
+# Сценарии:
+# 1) Обычный апгрейд: migrate deploy проходит — сразу node.
+# 2) P3009 (зависшая failed-запись): resolve --rolled-back → снова deploy (без resolve --applied).
+# 3) P3005: БД с данными, но без истории Prisma — clone_bots при необходимости, drift → schema,
+#    baseline всех миграций, deploy.
+# 4) Greenfield (только чистая установка): lexsort имён миграций ломает deploy на пустой БД
+#    (раньше применяются инкременты без базовых таблиц). Тогда допустим ТОЛЬКО если в public
+#    нет «настоящих» таблиц — только _prisma_migrations и/или pending_* — иначе это прод с
+#    рассинхроном: автоматический DROP SCHEMA запрещён, нужен бэкап и ручной ремонт.
+#
+# Важно: шаг diff (P3005 / greenfield) может быть деструктивным — бэкап перед первым прод-запуском.
 
 set -eu
 cd /app
 
 log() {
   printf '%s\n' "[docker-entrypoint] $*"
+}
+
+# Помечает все папки prisma/migrations как применённые (после ручного приведения схемы к schema.prisma).
+apply_baseline_all() {
+  log "baseline: migrate resolve --applied для всех миграций"
+  for dir in $(ls -1d prisma/migrations/*/ 2>/dev/null | LC_ALL=C sort); do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    case $name in migration_lock.toml) continue ;; esac
+    [ -f "$dir/migration.sql" ] || continue
+    log "  resolve --applied $name"
+    code=0
+    out=$(npx prisma migrate resolve --applied "$name" 2>&1) || code=$?
+    printf '%s\n' "$out"
+    if [ "$code" -ne 0 ]; then
+      case "$out" in *P3008*|*"already recorded"*) ;; *)
+        log "migrate resolve --applied $name завершился с ошибкой (см. выше)"
+        return 1
+      ;; esac
+    fi
+  done
+  return 0
 }
 
 if [ -z "${DATABASE_URL:-}" ]; then
@@ -24,9 +49,11 @@ fi
 
 MIGRATE_LOG=$(mktemp)
 DRIFT_SQL=""
+GF_SQL=""
 cleanup() {
   rm -f "$MIGRATE_LOG"
   [ -n "$DRIFT_SQL" ] && rm -f "$DRIFT_SQL"
+  [ -n "$GF_SQL" ] && rm -f "$GF_SQL"
 }
 trap cleanup EXIT INT TERM
 
@@ -38,10 +65,9 @@ fi
 
 cat "$MIGRATE_LOG" >&2 || true
 
-# P3009: в _prisma_migrations висит failed-миграция от прошлой попытки (не доехала
-# до конца, оставила started_at без finished_at). Снимаем её через rolled-back +
-# applied и снова пробуем deploy. Только если миграция уже создала свои объекты —
-# в противном случае applied не корректен и сюда не попадаем.
+# P3009: в _prisma_migrations висит failed-миграция (started без finished). Снимаем
+# через rolled-back и снова migrate deploy — миграция выполнится заново. Нельзя сразу
+# resolve --applied: при P3018 (нет таблицы) это помечало миграцию применённой без SQL.
 if grep -q "P3009" "$MIGRATE_LOG"; then
   log "P3009: в истории есть failed-миграция, пытаюсь её снять"
   # Имена папок миграций: YYYYMMDD_name (8 цифр) или YYYYMMDDHHMMSS_name (14+)
@@ -52,19 +78,68 @@ if grep -q "P3009" "$MIGRATE_LOG"; then
   fi
   log "  resolve --rolled-back $STUCK"
   npx prisma migrate resolve --rolled-back "$STUCK" || true
-  log "  resolve --applied $STUCK (полагаемся что схема уже совпадает)"
-  npx prisma migrate resolve --applied "$STUCK" || true
   log "повторный migrate deploy после снятия P3009"
-  if npx prisma migrate deploy; then
+  if npx prisma migrate deploy >"$MIGRATE_LOG" 2>&1; then
+    cat "$MIGRATE_LOG" || true
     log "migrate deploy: OK (после P3009 recovery)"
     exec node dist/index.js
   fi
-  log "migrate deploy всё ещё не проходит после P3009 recovery — см. лог выше."
-  exit 1
+  cat "$MIGRATE_LOG" >&2 || true
+  log "migrate deploy после P3009 recovery не прошёл — смотрю greenfield / другие ветки"
 fi
 
 if ! grep -q "P3005" "$MIGRATE_LOG"; then
-  log "migrate deploy failed — не P3005 и не P3009. См. лог выше."
+  # Greenfield только если в БД ещё нет рабочей схемы: допустимы лишь _prisma_migrations и
+  # pending_* (артефакт частичного migrate). Любая другая таблица = уже не «пустой инсталл» —
+  # DROP SCHEMA запрещён, чтобы не уничтожить прод при рассинхроне истории миграций.
+  if command -v psql >/dev/null 2>&1; then
+    only_bootstrap_tables=$(psql "$DATABASE_URL" -t -A -c "SELECT NOT EXISTS (SELECT 1 FROM information_schema.tables t WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND t.table_name NOT IN ('_prisma_migrations', 'pending_telegram_links', 'pending_email_links'));" 2>/dev/null) || only_bootstrap_tables=f
+    only_bootstrap_tables=$(printf '%s' "$only_bootstrap_tables" | tr -d '[:space:]')
+    clients_missing=$(psql "$DATABASE_URL" -t -A -c "SELECT (to_regclass('public.clients') IS NULL);" 2>/dev/null) || clients_missing=t
+    clients_missing=$(printf '%s' "$clients_missing" | tr -d '[:space:]')
+    if [ "$only_bootstrap_tables" = "t" ]; then
+      log "greenfield: в public только служебные таблицы (или пусто) — безопасный сброс и полная схема из Prisma + baseline миграций"
+      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;' || {
+        log "ERROR: не удалось сбросить schema public (нужны права владельца БД)"
+        exit 1
+      }
+      GF_SQL=$(mktemp)
+      if ! npx prisma migrate diff \
+        --from-empty \
+        --to-schema-datamodel prisma/schema.prisma \
+        --script >"$GF_SQL" 2>/tmp/gf.stderr; then
+        log "migrate diff --from-empty failed:"
+        cat /tmp/gf.stderr >&2 || true
+        rm -f /tmp/gf.stderr
+        exit 1
+      fi
+      rm -f /tmp/gf.stderr
+      if ! [ -s "$GF_SQL" ] || ! grep -q '[^[:space:]]' "$GF_SQL"; then
+        log "ERROR: migrate diff --from-empty дал пустой SQL"
+        exit 1
+      fi
+      log "применяю полную схему ($(wc -c <"$GF_SQL" | tr -d " ") байт)"
+      npx prisma db execute --url "$DATABASE_URL" --file "$GF_SQL" || {
+        log "ERROR: db execute полной схемы не прошёл"
+        exit 1
+      }
+      rm -f "$GF_SQL"
+      GF_SQL=""
+      apply_baseline_all || exit 1
+      log "migrate deploy (после greenfield baseline)"
+      if npx prisma migrate deploy; then
+        log "migrate deploy: OK (greenfield)"
+        exec node dist/index.js
+      fi
+      log "ERROR: migrate deploy после greenfield всё ещё падает — см. лог выше"
+      exit 1
+    fi
+    if [ "$only_bootstrap_tables" != "t" ] && [ "$clients_missing" = "t" ]; then
+      log "ERROR: migrate deploy не прошёл, нет public.clients, но в БД уже есть таблицы кроме _prisma_migrations / pending_*. Автосброс public отключён (это не чистая установка). Бэкап → migrate resolve / восстановление из дампа."
+      exit 1
+    fi
+  fi
+  log "migrate deploy failed — не P3005 и не P3009 (и не greenfield). См. лог выше."
   exit 1
 fi
 
@@ -131,24 +206,7 @@ else
   log "drift SQL пуст — схема уже совпадает с schema.prisma, только baseline записей"
 fi
 
-log "baseline: migrate resolve --applied для всех миграций"
-# Сортировка по имени папки = хронология YYYYMMDD...
-for dir in $(ls -1d prisma/migrations/*/ 2>/dev/null | LC_ALL=C sort); do
-  [ -d "$dir" ] || continue
-  name=$(basename "$dir")
-  case $name in migration_lock.toml) continue ;; esac
-  [ -f "$dir/migration.sql" ] || continue
-  log "  resolve --applied $name"
-  code=0
-  out=$(npx prisma migrate resolve --applied "$name" 2>&1) || code=$?
-  printf '%s\n' "$out"
-  if [ "$code" -ne 0 ]; then
-    case "$out" in *P3008*|*"already recorded"*) ;; *)
-      log "migrate resolve --applied $name завершился с ошибкой (см. выше)"
-      exit 1
-    ;; esac
-  fi
-done
+apply_baseline_all || exit 1
 
 log "migrate deploy (после baseline)"
 npx prisma migrate deploy
