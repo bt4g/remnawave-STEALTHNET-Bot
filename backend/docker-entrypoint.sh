@@ -57,6 +57,47 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Schema drift auto-fix: для каждой папки prisma/migrations извлекаем имя ПЕРВОЙ
+# таблицы которую создаёт её SQL (CREATE TABLE …). Если такая миграция помечена
+# в _prisma_migrations как успешно применённая (finished_at IS NOT NULL и
+# rolled_back_at IS NULL), но соответствующей таблицы в public ФАКТИЧЕСКИ нет —
+# журнал расходится с реальностью (типичные причины: восстановление БД из старого
+# дампа, ручной DROP TABLE, прерванная миграция в прошлом). Удаляем такие записи
+# из журнала чтобы migrate deploy переприменил их с нуля. Без этого Prisma пишет
+# "No pending migrations" и API падает с P2021 при первой же query.
+#
+# Срабатывает только если в БД уже есть таблицы (greenfield-ветка ниже сама всё
+# сбросит) и есть psql. Никогда не удаляет данные из существующих таблиц.
+if command -v psql >/dev/null 2>&1; then
+  drift_check_ok=$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public._prisma_migrations') IS NOT NULL" 2>/dev/null | tr -d '[:space:]') || drift_check_ok=""
+  if [ "$drift_check_ok" = "t" ]; then
+    DRIFTED=""
+    for dir in $(ls -1d prisma/migrations/*/ 2>/dev/null | LC_ALL=C sort); do
+      name=$(basename "$dir")
+      sql_file="$dir/migration.sql"
+      [ -f "$sql_file" ] || continue
+      # Применена ли запись?
+      applied=$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM _prisma_migrations WHERE migration_name='$name' AND finished_at IS NOT NULL AND rolled_back_at IS NULL" 2>/dev/null | tr -d '[:space:]')
+      [ "$applied" = "1" ] || continue
+      # Извлекаем имя ПЕРВОЙ создаваемой таблицы (CREATE TABLE [IF NOT EXISTS] "name" или name)
+      table=$(grep -ioE 'CREATE[[:space:]]+TABLE([[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS)?[[:space:]]+"[^"]+"' "$sql_file" | head -1 | sed -E 's/.*"([^"]+)"$/\1/')
+      [ -n "$table" ] || continue  # миграция-ALTER без CREATE TABLE — пропускаем
+      # Существует ли реально?
+      exists=$(psql "$DATABASE_URL" -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='$table'" 2>/dev/null | tr -d '[:space:]')
+      if [ "$exists" != "1" ]; then
+        log "DRIFT: миграция $name помечена applied, но таблицы '$table' нет — снимаю запись для переприменения"
+        DRIFTED="$DRIFTED $name"
+      fi
+    done
+    if [ -n "$DRIFTED" ]; then
+      for name in $DRIFTED; do
+        psql "$DATABASE_URL" -c "DELETE FROM _prisma_migrations WHERE migration_name='$name'" >/dev/null
+      done
+      log "drift detection: записи сняты, migrate deploy переприменит их"
+    fi
+  fi
+fi
+
 if npx prisma migrate deploy >"$MIGRATE_LOG" 2>&1; then
   cat "$MIGRATE_LOG" || true
   log "migrate deploy: OK"
