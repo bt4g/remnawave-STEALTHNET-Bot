@@ -421,6 +421,7 @@ function tariffToJson(t: {
   price: number;
   currency: string;
   sortOrder: number;
+  lavatopOfferId?: string | null;
   createdAt: Date;
   updatedAt: Date;
   priceOptions?: { id: string; durationDays: number; price: number; sortOrder: number }[];
@@ -444,6 +445,7 @@ function tariffToJson(t: {
     price: t.price,
     currency: t.currency,
     sortOrder: t.sortOrder,
+    lavatopOfferId: t.lavatopOfferId ?? null,
     priceOptions: (t.priceOptions ?? []).map((o) => ({
       id: o.id,
       durationDays: o.durationDays,
@@ -583,6 +585,8 @@ const createTariffSchema = z.object({
   price: z.number().min(0).optional(), // legacy: используется как fallback если priceOptions не заданы
   currency: z.string().max(10).optional(),
   sortOrder: z.number().int().optional(),
+  /** UUID оффера в Lava.top для этого тарифа. При оплате через Lava.top создаётся MONTHLY-подписка. */
+  lavatopOfferId: z.string().max(200).nullable().optional(),
   priceOptions: z.array(priceOptionInputSchema).min(1).max(20).optional(),
 });
 const updateTariffSchema = z.object({
@@ -599,6 +603,7 @@ const updateTariffSchema = z.object({
   deviceDiscountTiers: z.array(deviceDiscountTierSchema).max(20).optional(),
   price: z.number().min(0).optional(),
   currency: z.string().max(10).optional(),
+  lavatopOfferId: z.string().max(200).nullable().optional(),
   sortOrder: z.number().int().optional(),
   priceOptions: z.array(priceOptionInputSchema).min(1).max(20).optional(),
 });
@@ -652,6 +657,7 @@ adminRouter.post("/tariffs", async (req, res) => {
       price: legacyPrice,
       currency: (body.data.currency ?? "usd").toLowerCase(),
       sortOrder: body.data.sortOrder ?? 0,
+      lavatopOfferId: body.data.lavatopOfferId?.trim() || null,
       priceOptions: body.data.priceOptions
         ? {
           create: body.data.priceOptions.map((o, idx) => ({
@@ -675,7 +681,7 @@ adminRouter.patch("/tariffs/:id", async (req, res) => {
   if (!idParse.success) return res.status(400).json({ message: "Invalid id" });
   const body = updateTariffSchema.safeParse(req.body);
   if (!body.success) return res.status(400).json({ message: "Неверные данные", errors: body.error.flatten() });
-  const data: { name?: string; description?: string | null; durationDays?: number; internalSquadUuids?: string[]; trafficLimitBytes?: bigint | null; trafficResetMode?: string; deviceLimit?: number | null; includedDevices?: number; pricePerExtraDevice?: number; maxExtraDevices?: number; deviceDiscountTiers?: { minExtraDevices: number; discountPercent: number }[]; price?: number; currency?: string; sortOrder?: number } = {};
+  const data: { name?: string; description?: string | null; durationDays?: number; internalSquadUuids?: string[]; trafficLimitBytes?: bigint | null; trafficResetMode?: string; deviceLimit?: number | null; includedDevices?: number; pricePerExtraDevice?: number; maxExtraDevices?: number; deviceDiscountTiers?: { minExtraDevices: number; discountPercent: number }[]; price?: number; currency?: string; sortOrder?: number; lavatopOfferId?: string | null } = {};
   if (body.data.name != null) data.name = body.data.name;
   if (body.data.description !== undefined) data.description = body.data.description ?? null;
   if (body.data.internalSquadUuids != null) data.internalSquadUuids = body.data.internalSquadUuids;
@@ -688,6 +694,7 @@ adminRouter.patch("/tariffs/:id", async (req, res) => {
   if (body.data.deviceDiscountTiers !== undefined) data.deviceDiscountTiers = body.data.deviceDiscountTiers;
   if (body.data.currency !== undefined) data.currency = body.data.currency.toLowerCase();
   if (body.data.sortOrder != null) data.sortOrder = body.data.sortOrder;
+  if (body.data.lavatopOfferId !== undefined) data.lavatopOfferId = body.data.lavatopOfferId?.trim() || null;
   // Если priceOptions переданы — синхронизируем legacy поля с минимальной опцией.
   if (body.data.priceOptions && body.data.priceOptions.length > 0) {
     const sorted = [...body.data.priceOptions].sort((a, b) => a.price - b.price);
@@ -1357,6 +1364,84 @@ adminRouter.get("/settings", asyncRoute(async (_req, res) => {
   return res.json(config);
 }));
 
+/**
+ * GET /api/admin/lavatop/products
+ *
+ * Прокси к Lava.top API: возвращает список всех продуктов оператора со
+ * вложенными офферами. UI админки использует это чтобы показать удобный
+ * список offer ID — оператор копирует нужный UUID в поле тарифа.
+ *
+ * Аутентификация — текущий API-key из system_settings.lavatop_api_key.
+ */
+adminRouter.get("/lavatop/products", asyncRoute(async (_req, res) => {
+  const config = await getSystemConfig();
+  const apiKey = (config as { lavatopApiKey?: string | null }).lavatopApiKey?.trim();
+  if (!apiKey) {
+    return res.status(400).json({ message: "Lava.top API-ключ не настроен. Сначала введите его в Settings → Платежи → Lava.top." });
+  }
+  try {
+    const r = await fetch("https://gate.lava.top/api/v2/products", {
+      method: "GET",
+      headers: { "X-Api-Key": apiKey, Accept: "application/json" },
+    });
+    const text = await r.text();
+    if (r.status === 401) {
+      return res.status(401).json({ message: "Lava.top: неверный API-ключ (401)" });
+    }
+    if (!r.ok) {
+      return res.status(r.status).json({ message: `Lava.top API ${r.status}: ${text.slice(0, 300)}` });
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); } catch {
+      return res.status(502).json({ message: "Lava.top вернул невалидный JSON" });
+    }
+    type LavatopOffer = {
+      id: string;
+      name?: string;
+      description?: string;
+      prices?: { currency: string; amount: number; periodicity: string }[];
+    };
+    type LavatopProduct = {
+      id: string;
+      title?: string;
+      description?: string;
+      type?: string;
+      offers?: LavatopOffer[];
+    };
+    const data = parsed as { items?: LavatopProduct[] } | LavatopProduct[];
+    const items: LavatopProduct[] = Array.isArray(data)
+      ? (data as LavatopProduct[])
+      : Array.isArray(data?.items) ? data.items : [];
+
+    // Нормализуем: плоский список офферов с привязкой к продукту
+    const offers = items.flatMap((p) =>
+      (p.offers ?? []).map((o) => ({
+        offerId: o.id,
+        offerName: o.name ?? "",
+        offerDescription: (o.description ?? "").slice(0, 200),
+        productId: p.id,
+        productTitle: p.title ?? "",
+        productType: p.type ?? "",
+        prices: (o.prices ?? []).map((pr) => ({
+          currency: pr.currency,
+          amount: pr.amount,
+          periodicity: pr.periodicity,
+        })),
+      })),
+    );
+
+    return res.json({
+      productCount: items.length,
+      offerCount: offers.length,
+      offers,
+      products: items.map((p) => ({ id: p.id, title: p.title, type: p.type, offerCount: (p.offers ?? []).length })),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return res.status(502).json({ message: `Lava.top: нет связи (${msg})` });
+  }
+}));
+
 /** Базовый конфиг страницы подписки (subpage-00000000-0000-0000-0000-000000000000.json) для визуального редактора */
 adminRouter.get("/default-subscription-page-config", asyncRoute(async (_req, res) => {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1444,6 +1529,8 @@ const updateSettingsSchema = z.object({
   lavaShopId: z.string().max(200).nullable().optional(),
   lavaSecretKey: z.string().max(500).nullable().optional(),
   lavaAdditionalKey: z.string().max(500).nullable().optional(),
+  lavatopApiKey: z.string().max(500).nullable().optional(),
+  lavatopDefaultOfferId: z.string().max(200).nullable().optional(),
   overpayApiUrl: z.string().max(500).nullable().optional(),
   overpayProjectId: z.string().max(100).nullable().optional(),
   overpayLogin: z.string().max(200).nullable().optional(),
@@ -1950,6 +2037,14 @@ adminRouter.patch("/settings", async (req, res) => {
   if (updates.lavaAdditionalKey !== undefined) {
     const val = updates.lavaAdditionalKey ?? "";
     await prisma.systemSetting.upsert({ where: { key: "lava_additional_key" }, create: { key: "lava_additional_key", value: val }, update: { value: val } });
+  }
+  if (updates.lavatopApiKey !== undefined) {
+    const val = updates.lavatopApiKey ?? "";
+    await prisma.systemSetting.upsert({ where: { key: "lavatop_api_key" }, create: { key: "lavatop_api_key", value: val }, update: { value: val } });
+  }
+  if (updates.lavatopDefaultOfferId !== undefined) {
+    const val = updates.lavatopDefaultOfferId ?? "";
+    await prisma.systemSetting.upsert({ where: { key: "lavatop_default_offer_id" }, create: { key: "lavatop_default_offer_id", value: val }, update: { value: val } });
   }
   if (updates.overpayApiUrl !== undefined) {
     const val = updates.overpayApiUrl ?? "";

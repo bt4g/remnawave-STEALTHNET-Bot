@@ -18,6 +18,7 @@ import { yookassaWebhooksRouter } from "./modules/webhooks/yookassa.webhooks.rou
 import { cryptopayWebhooksRouter } from "./modules/webhooks/cryptopay.webhooks.routes.js";
 import { heleketWebhooksRouter } from "./modules/webhooks/heleket.webhooks.routes.js";
 import { lavaWebhooksRouter } from "./modules/webhooks/lava.webhooks.routes.js";
+import { lavatopWebhooksRouter } from "./modules/webhooks/lavatop.webhooks.routes.js";
 import { botAdminRouter } from "./modules/bot-admin/bot-admin.routes.js";
 import { botAdminRouter as botsAdminCrudRouter, botInternalRouter } from "./modules/bot/bot.routes.js";
 import { contestAdminRouter } from "./modules/contest/contest.admin.routes.js";
@@ -159,7 +160,7 @@ const giftPublicLimiter = rateLimit({
 app.use("/api/gift/public", giftPublicLimiter);
 
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", version: "4.1.0" });
+  res.json({ status: "ok", version: "4.2.0" });
 });
 
 // SSR-рендер index.html с подстановкой имени из брендинга (Telegram preview).
@@ -236,6 +237,8 @@ app.use("/api/webhooks", plategaWebhooksRouter); // raw body для /platega у�
 app.use("/api/webhooks", yoomoneyWebhooksRouter);
 app.use("/api/webhooks", yookassaWebhooksRouter);
 // cryptopay уже смонтирован выше с raw body
+// Lava.top использует X-Api-Key вместо HMAC, поэтому raw body не нужен — обычный JSON
+app.use("/api/webhooks/lavatop", lavatopWebhooksRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not found" });

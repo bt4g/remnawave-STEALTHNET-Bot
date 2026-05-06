@@ -251,6 +251,108 @@ const BOT_INNER_STYLE_LABELS: Record<string, { label: string; desc: string }> = 
   currency: { label: "Выбор валюты", desc: "Кнопки выбора валюты" },
 };
 
+/**
+ * Кнопка-загрузчик офферов из Lava.top.
+ * Дёргает /api/admin/lavatop/products, показывает список с offer ID и ценами.
+ * Каждый offer ID можно скопировать в один клик.
+ */
+function LavatopOffersBrowser() {
+  type Offer = {
+    offerId: string;
+    offerName: string;
+    offerDescription?: string;
+    productId: string;
+    productTitle: string;
+    productType: string;
+    prices: { currency: string; amount: number; periodicity: string }[];
+  };
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [offers, setOffers] = useState<Offer[] | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/admin/lavatop/products", {
+        credentials: "include",
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data?.message || `HTTP ${r.status}`);
+      setOffers(data.offers as Offer[]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyId(id: string) {
+    try { await navigator.clipboard.writeText(id); } catch { /* ignore */ }
+    setCopiedId(id);
+    setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1500);
+  }
+
+  return (
+    <div className="mt-4 pt-4 border-t border-dashed">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h5 className="text-sm font-semibold">Офферы в твоём Lava.top кабинете</h5>
+          <p className="text-xs text-muted-foreground">Скопируй offer ID и вставь в поле «Lava.top Offer ID» нужного тарифа.</p>
+        </div>
+        <Button type="button" size="sm" onClick={load} disabled={loading}>
+          {loading ? "Загружаю…" : (offers ? "Обновить" : "Показать офферы")}
+        </Button>
+      </div>
+      {error && (
+        <div className="text-xs rounded-md border border-red-300/50 bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 p-2 mb-2">
+          ❌ {error}
+        </div>
+      )}
+      {offers && offers.length === 0 && (
+        <p className="text-xs text-muted-foreground">У тебя нет ни одного оффера в кабинете Lava.top. Создай продукт + оффер на developers.lava.top.</p>
+      )}
+      {offers && offers.length > 0 && (
+        <div className="grid gap-2">
+          {offers.map((o) => {
+            const isCopied = copiedId === o.offerId;
+            return (
+              <div key={o.offerId} className="rounded-lg border border-white/10 bg-background/40 p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="font-semibold truncate">{o.offerName || "(без названия)"}</div>
+                    <div className="text-muted-foreground text-[10px] truncate">{o.productTitle} · {o.productType}</div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={isCopied ? "default" : "outline"}
+                    onClick={() => copyId(o.offerId)}
+                    className="shrink-0"
+                  >
+                    {isCopied ? "✓ Copied" : "Copy ID"}
+                  </Button>
+                </div>
+                <div className="font-mono text-[11px] break-all text-primary">{o.offerId}</div>
+                {o.prices.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {o.prices.map((p, i) => (
+                      <span key={i} className="rounded-md bg-primary/10 border border-primary/20 px-2 py-0.5">
+                        {p.amount} {p.currency} · {p.periodicity}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage() {
   const { t } = useTranslation();
   const { state, updateAdmin } = useAuth();
@@ -672,6 +774,8 @@ export function SettingsPage() {
         lavaShopId: settings.lavaShopId ?? null,
         lavaSecretKey: settings.lavaSecretKey && settings.lavaSecretKey !== "********" ? settings.lavaSecretKey : undefined,
         lavaAdditionalKey: settings.lavaAdditionalKey && settings.lavaAdditionalKey !== "********" ? settings.lavaAdditionalKey : undefined,
+        lavatopApiKey: settings.lavatopApiKey && settings.lavatopApiKey !== "********" ? settings.lavatopApiKey : undefined,
+        lavatopDefaultOfferId: settings.lavatopDefaultOfferId ?? null,
         overpayApiUrl: settings.overpayApiUrl ?? null,
         overpayProjectId: settings.overpayProjectId ?? null,
         overpayLogin: settings.overpayLogin ?? null,
@@ -3122,6 +3226,45 @@ export function SettingsPage() {
                         <p className="text-xs text-muted-foreground">{t("admin.settings.lava_additional_key_hint")}</p>
                       </div>
                     </div>
+
+                    {/* ─── Lava.top — отдельный провайдер, product/offer модель ─── */}
+                    <div className="pt-4 mt-4 border-t border-dashed">
+                      <h4 className="text-sm font-semibold mb-2">Lava.top (gate.lava.top)</h4>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Новый Lava (lava.top) — отличается от Lava Business (lava.ru). Использует продукты/офферы:
+                        в ЛК Lava.top создайте продукт с одним или несколькими offer'ами, скопируйте API-ключ
+                        и UUID дефолтного оффера. <a className="text-primary underline" href="https://developers.lava.top/ru" target="_blank" rel="noopener noreferrer">developers.lava.top</a> · <a className="text-primary underline" href="https://gate.lava.top/docs" target="_blank" rel="noopener noreferrer">Swagger</a>
+                      </p>
+                      <p className="text-xs text-muted-foreground mb-3">
+                        Webhook URL: <code className="font-mono">{(settings.publicAppUrl ?? "").replace(/\/$/, "")}/api/webhooks/lavatop</code>
+                        <br/>IP whitelist Lava.top для webhook'ов: <code className="font-mono">158.160.60.174</code>
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label>API-ключ Lava.top</Label>
+                          <Input
+                            type="password"
+                            value={settings.lavatopApiKey ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, lavatopApiKey: e.target.value || null } : s))}
+                            placeholder="********"
+                          />
+                          <p className="text-xs text-muted-foreground">ЛК Lava.top → Integrations → Public API</p>
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Default Offer ID (UUID)</Label>
+                          <Input
+                            value={settings.lavatopDefaultOfferId ?? ""}
+                            onChange={(e) => setSettings((s) => (s ? { ...s, lavatopDefaultOfferId: e.target.value || null } : s))}
+                            placeholder="00000000-0000-0000-0000-000000000000"
+                          />
+                          <p className="text-xs text-muted-foreground">UUID оффера. Используется как фолбэк если у тарифа нет своего offerId.</p>
+                        </div>
+                      </div>
+
+                      {/* ─── Список офферов из Lava.top API ─── */}
+                      <LavatopOffersBrowser />
+                    </div>
+
                     <div className="pt-2 border-t">
                       <Button type="submit" disabled={saving} className="min-w-[140px]">
                         {saving ? t("admin.settings.saving") : t("admin.settings.save")}

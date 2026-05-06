@@ -38,6 +38,7 @@ import { createYookassaPayment } from "../yookassa/yookassa.service.js";
 import { createCryptopayInvoice, isCryptopayConfigured } from "../cryptopay/cryptopay.service.js";
 import { createHeleketInvoice, isHeleketConfigured } from "../heleket/heleket.service.js";
 import { createLavaInvoice, isLavaConfigured } from "../lava/lava.service.js";
+import { createLavatopInvoice, isLavatopConfigured } from "../lavatop/lavatop.service.js";
 import { createOverpayPayformOrder, isOverpayConfigured } from "../overpay/overpay.service.js";
 import { applyPersonalDiscount } from "./personal-discount.js";
 import { getBotByToken, getPrimaryBot, paymentSnapshotTopup, paymentSnapshotProduct, applyMarkup } from "../bot/bot.service.js";
@@ -2386,25 +2387,45 @@ clientRouter.post("/payments/platega", async (req, res) => {
       };
     }
   } else {
-    if (originalAmount == null || !currency) return res.status(400).json({ message: "Укажите сумму и валюту" });
-    finalAmount = originalAmount;
-    currencyToUse = currency.toUpperCase();
+    // Если передан tariffId / proxyTariffId / singboxTariffId — цену+валюту берём
+    // из тарифа в БД (приоритет: tariffPriceOption → tariff). Если ни одного
+    // продуктового id не передано — это чистый top-up балансом, тогда обязателен
+    // явный amount+currency.
+    finalAmount = originalAmount ?? 0;
+    currencyToUse = (currency ?? "").toUpperCase();
     if (tariffId) {
-      const tariff = await prisma.tariff.findUnique({ where: { id: tariffId } });
+      const tariff = await prisma.tariff.findUnique({
+        where: { id: tariffId },
+        include: { priceOptions: true },
+      });
       if (!tariff) return res.status(400).json({ message: "Тариф не найден" });
       tariffIdToStore = tariffId;
+      // Цена: priceOption если выбран, иначе tariff.price
+      let unitPrice = tariff.price;
+      if (parsed.data.tariffPriceOptionId) {
+        const opt = (tariff.priceOptions ?? []).find((p) => p.id === parsed.data.tariffPriceOptionId);
+        if (opt) unitPrice = opt.price;
+      }
+      if (originalAmount == null) finalAmount = unitPrice;
+      if (!currency) currencyToUse = tariff.currency.toUpperCase();
     }
     if (proxyTariffId) {
       const proxyTariff = await prisma.proxyTariff.findUnique({ where: { id: proxyTariffId } });
       if (!proxyTariff || !proxyTariff.enabled) return res.status(400).json({ message: "Прокси-тариф не найден" });
       proxyTariffIdToStore = proxyTariffId;
-      if (originalAmount == null) { finalAmount = proxyTariff.price; currencyToUse = proxyTariff.currency.toUpperCase(); }
+      if (originalAmount == null) finalAmount = proxyTariff.price;
+      if (!currency) currencyToUse = proxyTariff.currency.toUpperCase();
     }
     if (singboxTariffId) {
       const singboxTariff = await prisma.singboxTariff.findUnique({ where: { id: singboxTariffId } });
       if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
       singboxTariffIdToStore = singboxTariffId;
-      if (originalAmount == null) { finalAmount = singboxTariff.price; currencyToUse = singboxTariff.currency.toUpperCase(); }
+      if (originalAmount == null) finalAmount = singboxTariff.price;
+      if (!currency) currencyToUse = singboxTariff.currency.toUpperCase();
+    }
+    // После всех попыток — если до сих пор пусто, значит ни тариф ни amount не пришли = top-up без суммы
+    if (finalAmount <= 0 || !currencyToUse) {
+      return res.status(400).json({ message: "Укажите сумму и валюту" });
     }
   }
 
@@ -4271,6 +4292,244 @@ clientRouter.post("/lava/create-payment", async (req, res) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[lava/create-payment]", message, err);
     return res.status(500).json({ message: message || "Ошибка создания платежа" });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════
+// Lava.top — создание инвойса через product/offer модель.
+// API: POST https://gate.lava.top/api/v2/invoice
+// Auth: X-Api-Key header. У оператора в ЛК Lava.top создан product с
+// несколькими offer'ами, мы передаём offerId (берём из тарифа.metadata
+// или из system_settings.lavatop_default_offer_id) + email клиента.
+// ═════════════════════════════════════════════════════════════════
+const lavatopCreatePaymentSchema = z.object({
+  amount: z.number().positive().optional(),
+  currency: z.string().min(1).max(10).optional(),
+  tariffId: z.string().min(1).optional(),
+  tariffPriceOptionId: z.string().min(1).optional(),
+  deviceCount: z.number().int().min(0).max(100).optional(),
+  proxyTariffId: z.string().min(1).optional(),
+  singboxTariffId: z.string().min(1).optional(),
+  promoCode: z.string().max(50).optional(),
+  /** Email клиента — Lava.top требует обязательно. Если не передан, берём из client.email */
+  email: z.string().email().optional(),
+  /** Кастомный offerId — переопределяет дефолтный из настроек */
+  offerId: z.string().min(1).optional(),
+  extraOption: z.object({
+    kind: z.enum(["traffic", "devices", "servers"]),
+    productId: z.string().min(1),
+  }).optional(),
+  customBuild: z.object({ days: z.number().int().min(1).max(360), devices: z.number().int().min(1).max(20), trafficGb: z.number().min(0).nullable().optional() }).optional(),
+});
+clientRouter.post("/lavatop/create-payment", async (req, res) => {
+  try {
+    const clientId = (req as unknown as { clientId: string }).clientId;
+    const parsed = lavatopCreatePaymentSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: "Неверные параметры", errors: parsed.error.flatten() });
+    const config = await getSystemConfig();
+    const lavatopConfig = {
+      apiKey: (config as { lavatopApiKey?: string | null }).lavatopApiKey ?? "",
+      defaultOfferId: (config as { lavatopDefaultOfferId?: string | null }).lavatopDefaultOfferId ?? undefined,
+    };
+    if (!isLavatopConfigured(lavatopConfig)) return res.status(503).json({ message: "Lava.top не настроена" });
+
+    const client = await prisma.client.findUnique({ where: { id: clientId }, select: { email: true } });
+    // Lava.top требует валидный email. Если у клиента нет email (Telegram-only регистрация) —
+    // генерим синтетический на основе домена сервиса (config.publicAppUrl). `.local` TLD
+    // отклоняется как невалидный, поэтому используем реальный домен оператора.
+    let buyerEmail = (parsed.data.email?.trim()) || client?.email?.trim() || "";
+    if (!buyerEmail) {
+      let domain = "lavatop-receipts.io";
+      try {
+        const u = new URL(config.publicAppUrl || "https://lavatop-receipts.io");
+        if (u.hostname && u.hostname.includes(".") && !u.hostname.endsWith(".local")) domain = u.hostname;
+      } catch { /* keep default */ }
+      buyerEmail = `client-${clientId}@${domain}`;
+    }
+
+    const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, offerId: customOfferId } = parsed.data;
+    let amountRounded: number;
+    let currencyUpper: string;
+    let tariffIdToStore: string | null = null;
+    let proxyTariffIdToStore: string | null = null;
+    let singboxTariffIdToStore: string | null = null;
+    let metadataObj: Record<string, unknown> = promoCodeStr ? { promoCode: promoCodeStr } : {};
+
+    if (customBuildBody) {
+      const cfg = getCustomBuildConfig(config);
+      if (!cfg) return res.status(400).json({ message: "Гибкий тариф отключён" });
+      const { days, devices, trafficGb } = customBuildBody;
+      if (days > cfg.maxDays || devices > cfg.maxDevices) {
+        return res.status(400).json({ message: `Дни: 1–${cfg.maxDays}, устройств: 1–${cfg.maxDevices}` });
+      }
+      const trafficLimitBytes =
+        cfg.trafficMode === "per_gb" && trafficGb != null && trafficGb >= 0
+          ? Math.round(trafficGb * 1024 ** 3)
+          : null;
+      amountRounded = days * cfg.pricePerDay + devices * cfg.pricePerDevice;
+      if (cfg.trafficMode === "per_gb" && trafficGb != null && trafficGb > 0) amountRounded += trafficGb * cfg.pricePerGb;
+      amountRounded = Math.round(amountRounded * 100) / 100;
+      currencyUpper = cfg.currency.toUpperCase();
+      metadataObj = {
+        customBuild: {
+          durationDays: days,
+          deviceLimit: devices,
+          trafficLimitBytes,
+          internalSquadUuids: [cfg.squadUuid],
+        },
+      };
+    } else if (extraOption) {
+      const cfg = config as { sellOptionsEnabled?: boolean; sellOptionsTrafficEnabled?: boolean; sellOptionsTrafficProducts?: SellOptionTrafficProduct[]; sellOptionsDevicesEnabled?: boolean; sellOptionsDevicesProducts?: SellOptionDeviceProduct[]; sellOptionsServersEnabled?: boolean; sellOptionsServersProducts?: SellOptionServerProduct[] };
+      if (!cfg.sellOptionsEnabled) return res.status(400).json({ message: "Продажа опций отключена" });
+      if (extraOption.kind === "traffic") {
+        const product = cfg.sellOptionsTrafficEnabled && cfg.sellOptionsTrafficProducts?.find((p) => p.id === extraOption.productId);
+        if (!product) return res.status(400).json({ message: "Опция не найдена" });
+        amountRounded = Math.round(product.price * 100) / 100;
+        currencyUpper = product.currency.toUpperCase();
+        metadataObj = { extraOption: { kind: "traffic", trafficBytes: Math.round(product.trafficGb * 1024 ** 3) } };
+      } else if (extraOption.kind === "devices") {
+        const product = cfg.sellOptionsDevicesEnabled && cfg.sellOptionsDevicesProducts?.find((p) => p.id === extraOption.productId);
+        if (!product) return res.status(400).json({ message: "Опция не найдена" });
+        amountRounded = Math.round(product.price * 100) / 100;
+        currencyUpper = product.currency.toUpperCase();
+        metadataObj = { extraOption: { kind: "devices", deviceCount: product.deviceCount } };
+      } else {
+        const product = cfg.sellOptionsServersEnabled && cfg.sellOptionsServersProducts?.find((p) => p.id === extraOption.productId);
+        if (!product) return res.status(400).json({ message: "Опция не найдена" });
+        amountRounded = Math.round(product.price * 100) / 100;
+        currencyUpper = product.currency.toUpperCase();
+        metadataObj = { extraOption: { kind: "servers", squadUuid: product.squadUuid, ...((product.trafficGb ?? 0) > 0 && { trafficBytes: Math.round((product.trafficGb ?? 0) * 1024 ** 3) }) } };
+      }
+    } else {
+      currencyUpper = (currencyBody ?? "RUB").toUpperCase();
+      if (tariffIdBody) {
+        const tariff = await prisma.tariff.findUnique({ where: { id: tariffIdBody } });
+        if (!tariff) return res.status(400).json({ message: "Тариф не найден" });
+        tariffIdToStore = tariffIdBody;
+        amountRounded = Math.round((amountBody ?? tariff.price) * 100) / 100;
+      } else if (proxyTariffIdBody) {
+        const proxyTariff = await prisma.proxyTariff.findUnique({ where: { id: proxyTariffIdBody } });
+        if (!proxyTariff || !proxyTariff.enabled) return res.status(400).json({ message: "Прокси-тариф не найден" });
+        proxyTariffIdToStore = proxyTariffIdBody;
+        amountRounded = Math.round((amountBody ?? proxyTariff.price) * 100) / 100;
+      } else if (singboxTariffIdBody) {
+        const singboxTariff = await prisma.singboxTariff.findUnique({ where: { id: singboxTariffIdBody } });
+        if (!singboxTariff || !singboxTariff.enabled) return res.status(400).json({ message: "Тариф Sing-box не найден" });
+        singboxTariffIdToStore = singboxTariffIdBody;
+        amountRounded = Math.round((amountBody ?? singboxTariff.price) * 100) / 100;
+      } else {
+        if (amountBody == null) return res.status(400).json({ message: "Укажите сумму" });
+        amountRounded = Math.round(amountBody * 100) / 100;
+      }
+    }
+
+    if (!["RUB", "USD", "EUR"].includes(currencyUpper)) {
+      return res.status(400).json({ message: "Lava.top принимает только RUB / USD / EUR" });
+    }
+    if (amountRounded < 1) return res.status(400).json({ message: "Минимальная сумма платежа — 1" });
+
+    // Персональная скидка / промокод
+    const lavatopIsTopup = !tariffIdToStore && !proxyTariffIdToStore && !singboxTariffIdToStore && !customBuildBody && !extraOption;
+    // Lava.top — только подписка на тариф (MONTHLY auto-renew). Топ-ап баланса
+    // отклоняем — для пополнения используются другие провайдеры (LAVA, ЮKassa, ЮMoney и т.д.).
+    if (lavatopIsTopup) {
+      return res.status(400).json({ message: "Lava.top доступен только для покупки тарифа (подписка с авто-списанием). Для пополнения баланса используйте другой способ оплаты." });
+    }
+    if (!lavatopIsTopup) {
+      const originalBeforePersonal = amountRounded;
+      const pd = await applyPersonalDiscount(amountRounded, clientId);
+      if (pd.personalDiscountPercent > 0) {
+        amountRounded = pd.amount;
+        metadataObj = { ...metadataObj, personalDiscountPercent: pd.personalDiscountPercent, originalAmount: originalBeforePersonal };
+      }
+    }
+    if (promoCodeStr?.trim() && !extraOption && !customBuildBody) {
+      const result = await validatePromoCode(promoCodeStr.trim(), clientId);
+      if (!result.ok) return res.status(result.status).json({ message: result.error });
+      const promo = result.promo;
+      if (promo.type !== "DISCOUNT") return res.status(400).json({ message: "Этот промокод не даёт скидку на оплату" });
+      const originalAmount = (metadataObj as { originalAmount?: number }).originalAmount ?? amountRounded;
+      if (promo.discountPercent && promo.discountPercent > 0) amountRounded = Math.max(0, amountRounded - amountRounded * promo.discountPercent / 100);
+      if (promo.discountFixed && promo.discountFixed > 0) amountRounded = Math.max(0, amountRounded - promo.discountFixed);
+      amountRounded = Math.round(amountRounded * 100) / 100;
+      if (amountRounded <= 0) return res.status(400).json({ message: "Итоговая сумма не может быть 0" });
+      metadataObj = { ...metadataObj, promoCodeId: promo.id, originalAmount };
+    }
+
+    // Определяем offerId. Приоритет:
+    //   1) req.body.offerId (явно передан клиентом — для расширенных интеграций)
+    //   2) tariff.lavatopOfferId (per-tariff offer, заданный оператором в админке)
+    //   3) settings.lavatop_default_offer_id (фолбэк для топ-апа баланса)
+    let offerId = customOfferId?.trim() || "";
+    if (!offerId && tariffIdToStore) {
+      const tariff = await prisma.tariff.findUnique({
+        where: { id: tariffIdToStore },
+        select: { lavatopOfferId: true },
+      });
+      if (tariff?.lavatopOfferId?.trim()) offerId = tariff.lavatopOfferId.trim();
+    }
+    if (!offerId) offerId = (lavatopConfig.defaultOfferId ?? "").trim();
+    if (!offerId) {
+      return res.status(400).json({ message: "Lava.top: не задан offerId. Укажите его в редактировании тарифа (поле «Lava.top Offer ID») или Default Offer ID в настройках." });
+    }
+
+    const lavatopSnap = lavatopIsTopup ? await paymentSnapshotTopup(clientId, amountRounded) : await paymentSnapshotProduct(clientId, amountRounded);
+    const orderId = randomUUID();
+    const payment = await createPayment({
+      data: asPaymentUncheckedCreate({
+        clientId,
+        orderId,
+        amount: lavatopSnap.amount,
+        baseAmount: lavatopSnap.baseAmount,
+        botMarkupPercent: lavatopSnap.botMarkupPercent,
+        botMarkupAmount: lavatopSnap.botMarkupAmount,
+        currency: currencyUpper,
+        status: "PENDING",
+        provider: "lavatop",
+        tariffId: tariffIdToStore,
+        tariffPriceOptionId: parsed.data.tariffPriceOptionId ?? null,
+        deviceCount: parsed.data.deviceCount ?? null,
+        proxyTariffId: proxyTariffIdToStore,
+        singboxTariffId: singboxTariffIdToStore,
+        metadata: Object.keys(metadataObj).length > 0 ? JSON.stringify(metadataObj) : null,
+      }),
+    });
+
+    const appUrl = (config.publicAppUrl || "").replace(/\/$/, "");
+    const redirectUrl = appUrl ? `${appUrl}/cabinet?lavatop=success` : undefined;
+    const failUrl = appUrl ? `${appUrl}/cabinet?lavatop=fail` : undefined;
+
+    // Для покупки тарифа используем подписку MONTHLY — Lava.top будет авто-списывать
+    // ежемесячно, и при каждом списании webhook продлит тариф у клиента (см. lavatop
+    // webhook handler: subscription.recurring.payment.success → activateTariffByPaymentId
+    // создаёт новый payment + extends subscription).
+    // Топ-ап баланса (без tariffId/proxyTariffId/etc) — разовая оплата ONE_TIME.
+    const periodicity: "ONE_TIME" | "MONTHLY" = lavatopIsTopup ? "ONE_TIME" : "MONTHLY";
+
+    const result = await createLavatopInvoice({
+      config: lavatopConfig,
+      email: buyerEmail,
+      offerId,
+      currency: currencyUpper as "RUB" | "USD" | "EUR",
+      contractId: orderId,
+      periodicity,
+      redirectUrl,
+      failUrl,
+      buyerLanguage: "RU",
+    });
+
+    if (!result.ok) {
+      await prisma.payment.delete({ where: { id: payment.id } }).catch(() => {});
+      return res.status(500).json({ message: result.error });
+    }
+
+    await prisma.payment.update({ where: { id: payment.id }, data: { externalId: result.contractId } });
+    const payUrl = await saveRedirectAndBuildUrl(payment.id, orderId, result.paymentUrl, config.publicAppUrl);
+    return res.status(201).json({ paymentId: payment.id, payUrl });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[lavatop/create-payment]", message, err);
+    return res.status(500).json({ message: message || "Ошибка создания платежа Lava.top" });
   }
 });
 

@@ -476,6 +476,7 @@ export function tariffPaymentMethodButtons(
   tariffCurrency?: string,
   heleketEnabled?: boolean,
   lavaEnabled?: boolean,
+  lavatopEnabled?: boolean,
 ): InlineMarkup {
   const back = (backLabel && backLabel.trim()) || DEFAULT_BACK_LABEL;
   const backSty = undefined;
@@ -496,6 +497,10 @@ export function tariffPaymentMethodButtons(
   // LAVA Business — только RUB (СБП / Карты / СберPay)
   if (lavaEnabled && (!tariffCurrency || tariffCurrency.toUpperCase() === "RUB")) {
     rows.push([btn("💳 Lava — СБП / Карты", `pay_tariff_lava:${tariffId}`, undefined, cardId)]);
+  }
+  // Lava.top — RUB / USD / EUR через product/offer модель
+  if (lavatopEnabled) {
+    rows.push([btn("💳 Lava.top — СБП / Карты", `pay_tariff_lavatop:${tariffId}`, undefined, cardId)]);
   }
   if (cryptopayEnabled) {
     rows.push([btn("💳 Crypto Bot — криптовалюта", `pay_tariff_cryptopay:${tariffId}`, undefined, cardId)]);
@@ -696,6 +701,7 @@ export function topupPaymentMethodButtons(
   cryptopayEnabled?: boolean,
   heleketEnabled?: boolean,
   lavaEnabled?: boolean,
+  lavatopEnabled?: boolean,
 ): InlineMarkup {
   const back = (backLabel && backLabel.trim()) || DEFAULT_BACK_LABEL;
   const backSty = resolveStyle(toStyle(backStyle), "danger");
@@ -710,6 +716,9 @@ export function topupPaymentMethodButtons(
   if (lavaEnabled) {
     rows.push([btn("💳 Lava — СБП / Карты", `topup_lava:${amount}`, "primary", cardId)]);
   }
+  // Lava.top — только для тарифов (subscription mode), не для топ-апа баланса.
+  // Параметр lavatopEnabled оставлен в сигнатуре для обратной совместимости.
+  void lavatopEnabled;
   if (cryptopayEnabled) {
     rows.push([btn("💳 Crypto Bot — криптовалюта", `topup_cryptopay:${amount}`, "primary", cardId)]);
   }

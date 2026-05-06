@@ -475,6 +475,9 @@ model Tariff {
   price               Float    @default(0)
   currency            String   @default("usd") @map("currency")
   sortOrder           Int      @default(0) @map("sort_order")
+  /// UUID оффера в Lava.top для этого тарифа. Если null — используется system_settings.lavatop_default_offer_id.
+  /// При оплате через Lava.top инвойс выписывается с periodicity=MONTHLY (subscription с авто-списанием).
+  lavatopOfferId      String?  @map("lavatop_offer_id")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 

@@ -1,5 +1,5 @@
 /**
- * STEALTHNET 4.1.0 — Telegram-бот
+ * STEALTHNET 4.2.0 — Telegram-бот
  * Полный функционал кабинета: главная, тарифы, профиль, пополнение, триал, реферальная ссылка, VPN.
  * Цветные кнопки: style primary / success / danger (Telegram Bot API).
  */
@@ -1199,7 +1199,7 @@ async function showPaymentMethodsForTariff(ctx: any, userId: number, tariff: Tar
     currency: tariff.currency,
     action: "Выберите способ оплаты:",
   }, discountArg);
-  await editMessageContent(ctx, pay.text, tariffPaymentMethodButtons(tariff.id, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, balanceLabel, !!config?.yoomoneyEnabled, !!config?.yookassaEnabled, !!config?.cryptopayEnabled, tariff.currency, !!config?.heleketEnabled, !!config?.lavaEnabled), pay.entities);
+  await editMessageContent(ctx, pay.text, tariffPaymentMethodButtons(tariff.id, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, balanceLabel, !!config?.yoomoneyEnabled, !!config?.yookassaEnabled, !!config?.cryptopayEnabled, tariff.currency, !!config?.heleketEnabled, !!config?.lavaEnabled, !!config?.lavatopEnabled), pay.entities);
 }
 
 /** Picker доп. устройств для подарочной подписки. */
@@ -2684,6 +2684,44 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    if (data.startsWith("pay_tariff_lavatop:")) {
+      const tariffId = data.slice("pay_tariff_lavatop:".length);
+      const { items } = await api.getPublicTariffs();
+      const tariff = items?.flatMap((c: TariffCategory) => c.tariffs).find((t: TariffItem) => t.id === tariffId);
+      if (!tariff) {
+        await editMessageContent(ctx, "Тариф не найден.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        return;
+      }
+      try {
+        const discountInfo = activeDiscountCode.get(userId);
+        const promoCode = discountInfo?.code;
+        const sel = selectedTariffOption.get(userId);
+        const opts = sortedPriceOptions(tariff.priceOptions);
+        const eff = sel?.tariffId === tariff.id ? sel.option : (opts.length === 1 ? opts[0]! : null);
+        const unitPrice = eff?.price ?? tariff.price;
+        const effectiveDays = eff?.durationDays ?? tariff.durationDays;
+        const extraDevices = sel?.tariffId === tariff.id ? sel.extraDevices : 0;
+        const { extrasTotal } = applyExtraDevicesPriceBot(tariff.pricePerExtraDevice ?? 0, extraDevices, tariff.deviceDiscountTiers, effectiveDays);
+        const effectivePrice = unitPrice + extrasTotal;
+        const payment = await api.createLavatopPayment(token, { amount: effectivePrice, currency: tariff.currency, tariffId: tariff.id, tariffPriceOptionId: eff?.id, deviceCount: extraDevices, promoCode });
+        if (promoCode) activeDiscountCode.delete(userId);
+        selectedTariffOption.delete(userId);
+        const discountArg = discountInfo ? {
+          originalPrice: formatMoney(effectivePrice, tariff.currency),
+          discountedPrice: formatMoney(getDiscountedPrice(effectivePrice, discountInfo), tariff.currency),
+        } : undefined;
+        const nameWithDays = (opts.length > 1 || (sel?.tariffId === tariff.id))
+          ? `${tariff.name} · ${formatRuDays(effectiveDays)}`
+          : tariff.name;
+        const msg = buildPaymentMessage(config, { name: nameWithDays, price: formatMoney(effectivePrice, tariff.currency), amount: String(effectivePrice), currency: tariff.currency, action: "Нажмите кнопку ниже для оплаты через Lava.top:" }, discountArg);
+        await editMessageContent(ctx, msg.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), msg.entities);
+      } catch (e: unknown) {
+        const m = e instanceof Error ? e.message : "Ошибка создания платежа Lava.top";
+        await editMessageContent(ctx, `❌ ${m}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
     // Heleket: оплата тарифа (крипто)
     if (data.startsWith("pay_tariff_heleket:")) {
       const tariffId = data.slice("pay_tariff_heleket:".length);
@@ -3342,6 +3380,25 @@ composer.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    if (data.startsWith("topup_lavatop:")) {
+      const amountStr = data.slice("topup_lavatop:".length);
+      const amount = Number(amountStr);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await editMessageContent(ctx, "Неверная сумма.", backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+        return;
+      }
+      const client = await api.getMe(token);
+      try {
+        const payment = await api.createLavatopPayment(token, { amount, currency: client.preferredCurrency ?? "RUB" });
+        const lvTopup = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency ?? "RUB")}\n\nНажмите кнопку ниже для оплаты через Lava.top:`, config?.botEmojis);
+        await editMessageContent(ctx, lvTopup.text, payUrlMarkup(payment.payUrl, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds), lvTopup.entities);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Ошибка создания платежа Lava.top";
+        await editMessageContent(ctx, `❌ ${msg}`, backToMenu(config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds));
+      }
+      return;
+    }
+
     if (data.startsWith("topup_heleket:")) {
       const amountStr = data.slice("topup_heleket:".length);
       const amount = Number(amountStr);
@@ -3389,12 +3446,13 @@ composer.on("callback_query:data", async (ctx) => {
       const cryptopayEnabled = !!config?.cryptopayEnabled;
       const heleketEnabled = !!config?.heleketEnabled;
       const lavaEnabled = !!config?.lavaEnabled;
+      const lavatopEnabled = !!config?.lavatopEnabled;
       // Если есть >1 способа любого типа — показываем выбор
-      const anyOnline = yooEnabled || yookassaEnabled || cryptopayEnabled || heleketEnabled || lavaEnabled;
-      const enabledOnlineCount = [yooEnabled, yookassaEnabled, cryptopayEnabled, heleketEnabled, lavaEnabled].filter(Boolean).length;
+      const anyOnline = yooEnabled || yookassaEnabled || cryptopayEnabled || heleketEnabled || lavaEnabled || lavatopEnabled;
+      const enabledOnlineCount = [yooEnabled, yookassaEnabled, cryptopayEnabled, heleketEnabled, lavaEnabled, lavatopEnabled].filter(Boolean).length;
       if (methods.length > 1 || (methods.length >= 1 && anyOnline) || (methods.length === 0 && enabledOnlineCount >= 2)) {
         const topupPay2 = titleWithEmoji("CARD", `Пополнение на ${formatMoney(amount, client.preferredCurrency)}\n\nВыберите способ оплаты:`, config?.botEmojis);
-        await editMessageContent(ctx, topupPay2.text, topupPaymentMethodButtons(amountStr, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, yooEnabled, yookassaEnabled, cryptopayEnabled, heleketEnabled, lavaEnabled), topupPay2.entities);
+        await editMessageContent(ctx, topupPay2.text, topupPaymentMethodButtons(amountStr, methods, config?.botBackLabel ?? null, innerStyles?.back, innerEmojiIds, yooEnabled, yookassaEnabled, cryptopayEnabled, heleketEnabled, lavaEnabled, lavatopEnabled), topupPay2.entities);
         return;
       }
       // Если ЮMoney единственный способ (нет platega, нет ЮKassa) — сразу создаём платёж ЮMoney
@@ -4066,7 +4124,8 @@ composer.on("message:text", async (ctx) => {
     const cryptopayEnabledMsg = !!config?.cryptopayEnabled;
     const heleketEnabledMsg = !!config?.heleketEnabled;
     const lavaEnabledMsg = !!config?.lavaEnabled;
-    if (!methods.length && !yooEnabled && !yookassaEnabledMsg && !cryptopayEnabledMsg && !heleketEnabledMsg && !lavaEnabledMsg) {
+    const lavatopEnabledMsg = !!config?.lavatopEnabled;
+    if (!methods.length && !yooEnabled && !yookassaEnabledMsg && !cryptopayEnabledMsg && !heleketEnabledMsg && !lavaEnabledMsg && !lavatopEnabledMsg) {
       await ctx.reply("Пополнение временно недоступно.");
       return;
     }
@@ -4084,13 +4143,13 @@ composer.on("message:text", async (ctx) => {
           connect: botEmojis.SERVERS?.tgEmojiId || botEmojis.CONNECT?.tgEmojiId,
         }
       : undefined;
-    const enabledOnlineMsg = [yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg].filter(Boolean).length;
+    const enabledOnlineMsg = [yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg, lavatopEnabledMsg].filter(Boolean).length;
     const anyOnlineMsg = enabledOnlineMsg > 0;
     if (methods.length > 1 || (methods.length >= 1 && anyOnlineMsg) || (methods.length === 0 && enabledOnlineMsg >= 2)) {
       const topupMsg1 = titleWithEmoji("CARD", `Пополнение на ${formatMoney(num, client.preferredCurrency)}\n\nВыберите способ оплаты:`, config?.botEmojis);
       await ctx.reply(topupMsg1.text, {
         entities: topupMsg1.entities.length ? topupMsg1.entities : undefined,
-        reply_markup: topupPaymentMethodButtons(String(num), methods, config?.botBackLabel ?? null, backStyle, msgEmojiIds, yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg),
+        reply_markup: topupPaymentMethodButtons(String(num), methods, config?.botBackLabel ?? null, backStyle, msgEmojiIds, yooEnabled, yookassaEnabledMsg, cryptopayEnabledMsg, heleketEnabledMsg, lavaEnabledMsg, lavatopEnabledMsg),
       });
       return;
     }

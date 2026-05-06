@@ -98,6 +98,7 @@ function ClassicTariffsPage() {
   const [cryptopayEnabled, setCryptopayEnabled] = useState(false);
   const [heleketEnabled, setHeleketEnabled] = useState(false);
   const [lavaEnabled, setLavaEnabled] = useState(false);
+  const [lavatopEnabled, setLavatopEnabled] = useState(false);
   const [overpayEnabled, setOverpayEnabled] = useState(false);
   const [paymentProviders, setPaymentProviders] = useState<{ id: string; label: string; sortOrder: number }[]>([]);
   const [trialConfig, setTrialConfig] = useState<{ trialEnabled: boolean; trialDays: number }>({ trialEnabled: false, trialDays: 0 });
@@ -152,6 +153,7 @@ function ClassicTariffsPage() {
       setCryptopayEnabled(Boolean(c.cryptopayEnabled));
       setHeleketEnabled(Boolean(c.heleketEnabled));
       setLavaEnabled(Boolean(c.lavaEnabled));
+      setLavatopEnabled(Boolean(c.lavatopEnabled));
       setOverpayEnabled(Boolean(c.overpayEnabled));
       setPaymentProviders(c.paymentProviders ?? []);
       setTrialConfig({ trialEnabled: !!c.trialEnabled, trialDays: c.trialDays ?? 0 });
@@ -440,6 +442,27 @@ function ClassicTariffsPage() {
     }
   }
 
+  async function startLavatopPayment(tariff: TariffForPay) {
+    if (!token) return;
+    setPayError(null);
+    setPayLoading(true);
+    try {
+      const res = await api.lavatopCreatePayment(token, {
+        amount: tariff.price,
+        currency: tariff.currency,
+        tariffId: tariff.id,
+        tariffPriceOptionId: selectedPriceOptionId ?? undefined,
+        deviceCount: selectedExtraDevices,
+        promoCode: promoResult ? promoInput.trim() : undefined,
+      });
+      if (res.payUrl) setReadyUrl({ url: res.payUrl, provider: "Lava.top" });
+    } catch (e) {
+      setPayError(e instanceof Error ? e.message : t("cabinet.tariffs.error_payment"));
+    } finally {
+      setPayLoading(false);
+    }
+  }
+
   async function startOverpayPayment(tariff: TariffForPay) {
     if (!token) return;
     setPayError(null);
@@ -665,6 +688,7 @@ function ClassicTariffsPage() {
                 { id: "yookassa", enabled: yookassaEnabled && isRub, onClick: () => startYookassaPayment(tariff), label: providerLabel("yookassa", t("cabinet.tariffs.sbp_cards_ru")), icon: "card" },
                 { id: "yoomoney", enabled: yoomoneyEnabled && isRub, onClick: () => startYoomoneyPayment(tariff), label: providerLabel("yoomoney", t("cabinet.tariffs.yoomoney_cards")), icon: "card" },
                 { id: "lava", enabled: lavaEnabled && isRub, onClick: () => startLavaPayment(tariff), label: providerLabel("lava", "LAVA"), icon: "card" },
+                { id: "lavatop", enabled: lavatopEnabled, onClick: () => startLavatopPayment(tariff), label: providerLabel("lavatop", "Lava.top"), icon: "card" },
                 { id: "overpay", enabled: overpayEnabled, onClick: () => startOverpayPayment(tariff), label: providerLabel("overpay", "Overpay"), icon: "card" },
               ];
 

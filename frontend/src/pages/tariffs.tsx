@@ -1169,6 +1169,7 @@ function TariffModal({
   const [discountTiers, setDiscountTiers] = useState<DiscountTierDraft[]>(() => buildInitialTiers(tariff));
   const [discountsEnabled, setDiscountsEnabled] = useState<boolean>(() => (tariff?.deviceDiscountTiers?.length ?? 0) > 0);
   const [currency, setCurrency] = useState<string>((tariff?.currency ?? "usd").toLowerCase());
+  const [lavatopOfferId, setLavatopOfferId] = useState<string>(tariff?.lavatopOfferId ?? "");
 
   useEffect(() => {
     if (isEdit && tariff) {
@@ -1186,6 +1187,7 @@ function TariffModal({
       setDiscountTiers(buildInitialTiers(tariff));
       setDiscountsEnabled((tariff.deviceDiscountTiers?.length ?? 0) > 0);
       setCurrency((tariff.currency ?? "usd").toLowerCase());
+      setLavatopOfferId(tariff.lavatopOfferId ?? "");
     } else {
       setName("");
       setDescription("");
@@ -1392,6 +1394,7 @@ function TariffModal({
           maxExtraDevices: effectiveMaxExtras,
           deviceDiscountTiers: normalizedTiers,
           currency: currency || "usd",
+          lavatopOfferId: lavatopOfferId.trim() || null,
           priceOptions: normalized,
         };
         await api.updateTariff(token, tariff.id, payload);
@@ -1409,6 +1412,7 @@ function TariffModal({
           maxExtraDevices: effectiveMaxExtras,
           deviceDiscountTiers: normalizedTiers,
           currency: currency || "usd",
+          lavatopOfferId: lavatopOfferId.trim() || null,
           priceOptions: normalized,
         };
         await api.createTariff(token, payload);
@@ -1496,6 +1500,23 @@ function TariffModal({
                   ))}
                 </select>
               </div>
+            </div>
+
+            {/* Lava.top Offer ID — для подписки MONTHLY на этот тариф */}
+            <div className="grid gap-1">
+              <Label htmlFor="tariff-lavatop-offer" className="text-[11px] text-muted-foreground">
+                Lava.top Offer ID <span className="text-[10px] opacity-60">(UUID оффера для MONTHLY-подписки)</span>
+              </Label>
+              <Input
+                id="tariff-lavatop-offer"
+                value={lavatopOfferId}
+                onChange={(e) => setLavatopOfferId(e.target.value)}
+                placeholder="00000000-0000-0000-0000-000000000000"
+                className="font-mono text-xs"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Создайте оффер в Lava.top dashboard с ценой = цене тарифа. При оплате через Lava.top создастся <b>подписка</b> с авто-списанием раз в месяц. Если пусто — используется Default Offer ID из настроек.
+              </p>
             </div>
 
             <DndContext

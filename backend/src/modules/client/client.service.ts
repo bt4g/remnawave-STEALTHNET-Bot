@@ -119,6 +119,7 @@ const SYSTEM_CONFIG_KEYS = [
   "cryptopay_api_token", "cryptopay_testnet",
   "heleket_merchant_id", "heleket_api_key",
   "lava_shop_id", "lava_secret_key", "lava_additional_key",
+  "lavatop_api_key", "lavatop_default_offer_id",
   "overpay_api_url", "overpay_project_id", "overpay_login", "overpay_password",
   "groq_api_key", "groq_model", "groq_fallback_1", "groq_fallback_2", "groq_fallback_3", "ai_system_prompt",
   "bot_buttons", "bot_buttons_per_row", "bot_back_label", "bot_menu_texts", "bot_menu_line_visibility", "bot_inner_button_styles",
@@ -539,6 +540,8 @@ export async function getSystemConfig() {
     lavaShopId: (map.lava_shop_id ?? "").trim() || null,
     lavaSecretKey: (map.lava_secret_key ?? "").trim() || null,
     lavaAdditionalKey: (map.lava_additional_key ?? "").trim() || null,
+    lavatopApiKey: (map.lavatop_api_key ?? "").trim() || null,
+    lavatopDefaultOfferId: (map.lavatop_default_offer_id ?? "").trim() || null,
     overpayApiUrl: (map.overpay_api_url ?? "").trim() || null,
     overpayProjectId: (map.overpay_project_id ?? "").trim() || null,
     overpayLogin: (map.overpay_login ?? "").trim() || null,
@@ -783,7 +786,8 @@ const DEFAULT_PAYMENT_PROVIDERS: PaymentProviderConfig[] = [
   { id: "yookassa", label: "ЮKassa (СБП / Карты)", sortOrder: 2 },
   { id: "yoomoney", label: "ЮMoney (Карты)", sortOrder: 3 },
   { id: "lava", label: "LAVA (СБП / Карты / СберPay)", sortOrder: 4 },
-  { id: "overpay", label: "Overpay (Карты / СБП)", sortOrder: 5 },
+  { id: "lavatop", label: "Lava.top (СБП / Карты)", sortOrder: 5 },
+  { id: "overpay", label: "Overpay (Карты / СБП)", sortOrder: 6 },
 ];
 
 function parsePaymentProviders(raw: string | undefined): PaymentProviderConfig[] {
@@ -1025,6 +1029,7 @@ export async function getPublicConfig(forCloneBot?: Pick<Bot, "markupPercent" | 
     cryptopayEnabled: Boolean((full as { cryptopayApiToken?: string | null }).cryptopayApiToken?.trim()),
     heleketEnabled: Boolean((full as { heleketMerchantId?: string | null }).heleketMerchantId?.trim() && (full as { heleketApiKey?: string | null }).heleketApiKey?.trim()),
     lavaEnabled: Boolean((full as { lavaShopId?: string | null }).lavaShopId?.trim() && (full as { lavaSecretKey?: string | null }).lavaSecretKey?.trim()),
+    lavatopEnabled: Boolean((full as { lavatopApiKey?: string | null }).lavatopApiKey?.trim()),
     overpayEnabled: Boolean(
       (full as { overpayApiUrl?: string | null }).overpayApiUrl?.trim() &&
       (full as { overpayProjectId?: string | null }).overpayProjectId?.trim() &&

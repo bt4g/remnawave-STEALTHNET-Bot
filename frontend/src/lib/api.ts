@@ -1665,6 +1665,27 @@ export const api = {
     return request("/client/lava/create-payment", { method: "POST", body: JSON.stringify(data), token });
   },
 
+  /** Lava.top — создание invoice через product/offer модель (RUB/USD/EUR) */
+  async lavatopCreatePayment(
+    token: string,
+    data: {
+      amount?: number;
+      currency?: string;
+      tariffId?: string;
+      tariffPriceOptionId?: string;
+      deviceCount?: number;
+      proxyTariffId?: string;
+      singboxTariffId?: string;
+      promoCode?: string;
+      email?: string;
+      offerId?: string;
+      extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string };
+      customBuild?: { days: number; devices: number; trafficGb?: number };
+    }
+  ): Promise<{ paymentId: string; payUrl: string }> {
+    return request("/client/lavatop/create-payment", { method: "POST", body: JSON.stringify(data), token });
+  },
+
   /** Overpay — создание платёжной формы (Карты/СБП), возвращает ссылку на оплату */
   async overpayCreatePayment(
     token: string,
@@ -2412,6 +2433,8 @@ export type UpdateSettingsPayload = {
   lavaShopId?: string | null;
   lavaSecretKey?: string | null;
   lavaAdditionalKey?: string | null;
+  lavatopApiKey?: string | null;
+  lavatopDefaultOfferId?: string | null;
   overpayApiUrl?: string | null;
   overpayProjectId?: string | null;
   overpayLogin?: string | null;
@@ -2769,6 +2792,8 @@ export interface AdminSettings {
   lavaShopId?: string | null;
   lavaSecretKey?: string | null;
   lavaAdditionalKey?: string | null;
+  lavatopApiKey?: string | null;
+  lavatopDefaultOfferId?: string | null;
   overpayApiUrl?: string | null;
   overpayProjectId?: string | null;
   overpayLogin?: string | null;
@@ -3470,6 +3495,7 @@ export interface TariffRecord {
   price: number;
   currency: string;
   sortOrder: number;
+  lavatopOfferId?: string | null;
   priceOptions: TariffPriceOption[];
   createdAt: string;
   updatedAt: string;
@@ -3491,6 +3517,7 @@ export type CreateTariffPayload = {
   price?: number;
   currency?: string;
   sortOrder?: number;
+  lavatopOfferId?: string | null;
   priceOptions?: { durationDays: number; price: number }[];
 };
 
@@ -3509,6 +3536,7 @@ export type UpdateTariffPayload = {
   price?: number;
   currency?: string;
   sortOrder?: number;
+  lavatopOfferId?: string | null;
   priceOptions?: { durationDays: number; price: number }[];
 };
 
@@ -3844,6 +3872,7 @@ export interface PublicConfig {
   cryptopayEnabled?: boolean;
   heleketEnabled?: boolean;
   lavaEnabled?: boolean;
+  lavatopEnabled?: boolean;
   overpayEnabled?: boolean;
   paymentProviders?: { id: string; label: string; sortOrder: number }[];
   trialEnabled?: boolean;

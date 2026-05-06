@@ -104,6 +104,7 @@ export async function getPublicConfig(): Promise<{
   cryptopayEnabled?: boolean;
   heleketEnabled?: boolean;
   lavaEnabled?: boolean;
+  lavatopEnabled?: boolean;
   botButtons?: { id: string; visible: boolean; label: string; order: number; style?: string; iconCustomEmojiId?: string; onePerRow?: boolean; emojiKey?: string }[] | null;
   /** Кнопок в ряд в главном меню: 1 или 2 */
   botButtonsPerRow?: 1 | 2;
@@ -333,6 +334,14 @@ export async function createLavaPayment(
   body: { amount?: number; currency?: string; tariffId?: string; tariffPriceOptionId?: string; deviceCount?: number; proxyTariffId?: string; singboxTariffId?: string; promoCode?: string; extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string } }
 ): Promise<{ paymentId: string; payUrl: string }> {
   return fetchJson("/api/client/lava/create-payment", { method: "POST", body, token });
+}
+
+/** Lava.top — создать invoice через product/offer модель (RUB/USD/EUR) */
+export async function createLavatopPayment(
+  token: string,
+  body: { amount?: number; currency?: string; tariffId?: string; tariffPriceOptionId?: string; deviceCount?: number; proxyTariffId?: string; singboxTariffId?: string; promoCode?: string; email?: string; offerId?: string; extraOption?: { kind: "traffic" | "devices" | "servers"; productId: string } }
+): Promise<{ paymentId: string; payUrl: string }> {
+  return fetchJson("/api/client/lavatop/create-payment", { method: "POST", body, token });
 }
 
 /** Обновить профиль (язык, валюта) */

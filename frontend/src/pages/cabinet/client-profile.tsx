@@ -58,6 +58,7 @@ function ClassicProfilePage() {
   const [cryptopayEnabled, setCryptopayEnabled] = useState(false);
   const [heleketEnabled, setHeleketEnabled] = useState(false);
   const [lavaEnabled, setLavaEnabled] = useState(false);
+  // Lava.top removed from balance top-up — оставлен только для тарифов (см. client-tariffs.tsx)
   const [overpayEnabled, setOverpayEnabled] = useState(false);
   const [paymentProviders, setPaymentProviders] = useState<{ id: string; label: string; sortOrder: number }[]>([]);
   const [publicAppUrl, setPublicAppUrl] = useState<string | null>(null);
@@ -445,6 +446,9 @@ function ClassicProfilePage() {
       setTopUpLoading(false);
     }
   }
+
+  // Lava.top — только subscription для тарифов, не для top-up. Кнопка отсутствует, функция оставлена закомменченной для возможного будущего использования.
+  // async function startTopUpLavatop() { ... }
 
   async function startTopUpOverpay() {
     if (!token || !client) return;
@@ -1187,6 +1191,7 @@ function ClassicProfilePage() {
                 { id: "yookassa", enabled: yookassaEnabled, onClick: () => startTopUpYookassa(), label: providerLabel("yookassa", t("cabinet.tariffs.sbp_cards_ru")), icon: "card" },
                 { id: "yoomoney", enabled: yoomoneyEnabled, onClick: () => startTopUpYoomoneyForm("AC"), label: providerLabel("yoomoney", t("cabinet.tariffs.yoomoney_cards")), icon: "card" },
                 { id: "lava", enabled: lavaEnabled && currency.toLowerCase() === "rub", onClick: () => startTopUpLava(), label: providerLabel("lava", "LAVA"), icon: "card" },
+                // Lava.top — только subscription для тарифов, не для top-up баланса
                 { id: "overpay", enabled: overpayEnabled, onClick: () => startTopUpOverpay(), label: providerLabel("overpay", "Overpay"), icon: "card" },
               ];
 

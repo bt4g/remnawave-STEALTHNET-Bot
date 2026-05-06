@@ -16,6 +16,16 @@
 #    говорит "no pending migrations", но физически таблицы (landing_theme,
 #    marketplace_categories, ...) отсутствуют. reconcile_schema_drift вызывается
 #    после КАЖДОГО успешного deploy'я и detect'ит этот рассинхрон по `migrate diff`.
+# 6) ⚠️ КЕЙС clone_bots SILENT-CORRUPTION: миграция `20260502160000_clone_bots`
+#    помечена `applied` в `_prisma_migrations`, но физически SQL не выполнен
+#    (например, `migrate resolve --applied` без накатывания файла). В `clients`
+#    7к+ строк, но колонки `bot_id` нет, или есть пустая. Drift хочет
+#    `ADD COLUMN bot_id TEXT NOT NULL` — psql падает на NOT NULL поверх данных,
+#    `verify_drift_resolved` корректно даёт FATAL. Чтобы пользователь не звонил
+#    вручную выполнять SQL, `rescue_clients_bot_id_pre_drift` лечит это сам:
+#    создаёт primary bot из `BOT_TOKEN` env, добавляет колонку nullable, заполняет
+#    значением, делает SET NOT NULL, добавляет индексы и FK. После этого
+#    apply_sql_lenient видит «всё уже есть» и через verify drift пуст.
 #
 # Важно: drift применяется через psql ON_ERROR_STOP=0 (statement-by-statement),
 # а НЕ через `prisma db execute` (один батч в транзакции — при первой ошибке
@@ -109,6 +119,107 @@ verify_drift_resolved() {
   return 0
 }
 
+# rescue_clients_bot_id_pre_drift — превентивно лечит сценарий 6 (clone_bots
+# silent-corruption): если drift хочет добавить `clients.bot_id` NOT NULL, а в
+# `clients` уже есть данные без bot_id — `apply_sql_lenient` упадёт на NOT NULL
+# constraint и `verify_drift_resolved` даст FATAL. Эта функция выполняет
+# rescue-сценарий, который делал бы человек руками:
+#   1) Если `bots` пуст — создаём primary bot из `BOT_TOKEN` env (username
+#      берётся через Telegram API getMe).
+#   2) `ADD COLUMN bot_id TEXT` (nullable) если колонки ещё нет.
+#   3) `UPDATE clients SET bot_id = <primary_bot.id>` для всех null'ов.
+#   4) `ALTER COLUMN bot_id SET NOT NULL`.
+#   5) Также добавляет смежные `telegram_unreachable`, индексы, FK
+#      (всё с IF NOT EXISTS / DO-блоками — идемпотентно).
+#
+# После rescue последующий `apply_sql_lenient` увидит «всё уже есть» (дубликаты
+# через ON_ERROR_STOP=0 пропустятся), а `verify_drift_resolved` подтвердит синк.
+#
+# Условия вызова: drift_file содержит ALTER на clients для bot_id NOT NULL.
+# Безопасно: если триггера нет — функция сразу выходит, ничего не трогая.
+rescue_clients_bot_id_pre_drift() {
+  drift_file="$1"
+  # Триггер: drift хочет ADD COLUMN bot_id NOT NULL в clients.
+  if ! grep -qE 'ALTER TABLE "clients"[^;]*"bot_id"[^;]*NOT NULL' "$drift_file" 2>/dev/null \
+       && ! grep -qE 'ALTER TABLE clients[^;]*bot_id[^;]*NOT NULL' "$drift_file" 2>/dev/null; then
+    return 0
+  fi
+  if ! command -v psql >/dev/null 2>&1; then return 0; fi
+  log "rescue_clients_bot_id: drift хочет clients.bot_id NOT NULL — проверяю состояние данных"
+
+  # Есть ли таблица clients?
+  has_clients=$(psql "$DATABASE_URL" -t -A -c "SELECT (to_regclass('public.clients') IS NOT NULL);" 2>/dev/null | tr -d '[:space:]')
+  if [ "$has_clients" != "t" ]; then
+    log "rescue_clients_bot_id: таблицы clients нет, rescue не нужен"
+    return 0
+  fi
+
+  clients_count=$(psql "$DATABASE_URL" -t -A -c "SELECT count(*) FROM clients;" 2>/dev/null | tr -d '[:space:]')
+  if [ "${clients_count:-0}" = "0" ]; then
+    log "rescue_clients_bot_id: clients пуст — drift накатится без проблем"
+    return 0
+  fi
+
+  # Гарантируем primary bot
+  has_bots_table=$(psql "$DATABASE_URL" -t -A -c "SELECT (to_regclass('public.bots') IS NOT NULL);" 2>/dev/null | tr -d '[:space:]')
+  if [ "$has_bots_table" != "t" ]; then
+    log "rescue_clients_bot_id: нет таблицы bots — невозможно сделать rescue (clone_bots миграция не применена ВООБЩЕ)"
+    return 1
+  fi
+  active_bots=$(psql "$DATABASE_URL" -t -A -c "SELECT count(*) FROM bots WHERE is_active = true;" 2>/dev/null | tr -d '[:space:]')
+  if [ "${active_bots:-0}" = "0" ]; then
+    if [ -z "${BOT_TOKEN:-}" ]; then
+      log "rescue_clients_bot_id: bots пуст и BOT_TOKEN не установлен — не могу создать primary bot, добавьте BOT_TOKEN в .env и перезапустите"
+      return 1
+    fi
+    log "rescue_clients_bot_id: bots пуст, создаю primary bot из BOT_TOKEN"
+    bot_username="primary_bot"
+    if command -v curl >/dev/null 2>&1; then
+      tg_resp=$(curl -s --max-time 10 "https://api.telegram.org/bot${BOT_TOKEN}/getMe" 2>/dev/null || true)
+      detected=$(printf '%s' "$tg_resp" | sed -nE 's/.*"username":"([^"]+)".*/\1/p')
+      if [ -n "$detected" ]; then
+        bot_username="$detected"
+      fi
+    fi
+    log "rescue_clients_bot_id: bot username=$bot_username"
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+      -v "bt=${BOT_TOKEN}" -v "bn=${bot_username}" <<'SQL' 2>&1 | sed 's/^/  /'
+INSERT INTO bots (id, token, username, is_primary, is_active, markup_percent, created_at, updated_at)
+SELECT 'rescue_' || replace(gen_random_uuid()::text, '-', ''),
+       :'bt', :'bn', true, true, 0, NOW(), NOW()
+WHERE NOT EXISTS (SELECT 1 FROM bots WHERE is_active = true);
+SQL
+  fi
+
+  primary_bot_id=$(psql "$DATABASE_URL" -t -A -c "SELECT id FROM bots WHERE is_active = true ORDER BY is_primary DESC, created_at LIMIT 1;" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$primary_bot_id" ]; then
+    log "rescue_clients_bot_id: не удалось определить primary bot id — abort"
+    return 1
+  fi
+  log "rescue_clients_bot_id: primary bot id = $primary_bot_id"
+
+  # Применяем rescue SQL (идемпотентный)
+  log "rescue_clients_bot_id: применяю DDL — ADD COLUMN bot_id, UPDATE, SET NOT NULL, индексы, FK"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=0 \
+    -v "pb=${primary_bot_id}" <<'SQL' 2>&1 | grep -vE '^\s*$' | sed 's/^/  /'
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS bot_id TEXT;
+UPDATE clients SET bot_id = :'pb' WHERE bot_id IS NULL;
+ALTER TABLE clients ALTER COLUMN bot_id SET NOT NULL;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS telegram_unreachable BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS clients_bot_id_idx ON clients(bot_id);
+CREATE UNIQUE INDEX IF NOT EXISTS clients_bot_id_telegram_id_unique ON clients(bot_id, telegram_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'clients_bot_id_fkey') THEN
+    ALTER TABLE clients ADD CONSTRAINT clients_bot_id_fkey
+      FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE RESTRICT ON UPDATE CASCADE;
+  END IF;
+END$$;
+SQL
+  log "rescue_clients_bot_id: завершено"
+  return 0
+}
+
 # Помечает все папки prisma/migrations как применённые (после ручного приведения схемы к schema.prisma).
 apply_baseline_all() {
   log "baseline: migrate resolve --applied для всех миграций"
@@ -174,6 +285,11 @@ reconcile_schema_drift() {
     return 0
   fi
   log "schema drift detected post-deploy: применяю недостающий DDL ($(wc -c <"$POST_DRIFT_SQL" | tr -d ' ') байт) — каждый statement отдельно через psql lenient"
+  # Превентивный rescue для clone_bots silent-corruption (см. сценарий 6 в шапке файла).
+  # Если drift хочет clients.bot_id NOT NULL поверх существующих данных — psql упал бы
+  # на NOT NULL constraint и verify_drift_resolved дал бы FATAL. Эта функция всё лечит
+  # сама и идемпотентна — если триггер не сработал или rescue не нужен, выходит мгновенно.
+  rescue_clients_bot_id_pre_drift "$POST_DRIFT_SQL" || log "rescue_clients_bot_id_pre_drift: возникли проблемы (см. логи выше), всё равно пробую apply_sql_lenient"
   apply_sql_lenient "$POST_DRIFT_SQL"
   rm -f "$POST_DRIFT_SQL"
   if ! verify_drift_resolved; then
@@ -317,6 +433,8 @@ rm -f /tmp/drift.stderr
 # Ненулевой размер и есть непробельные символы — применяем lenient
 if [ -s "$DRIFT_SQL" ] && grep -q '[^[:space:]]' "$DRIFT_SQL"; then
   log "применяю drift SQL ($(wc -c <"$DRIFT_SQL" | tr -d ' ') байт) через psql ON_ERROR_STOP=0 — каждый statement отдельно, дубликаты пропускаются молча"
+  # Pre-rescue для clone_bots silent-corruption (см. сценарий 6)
+  rescue_clients_bot_id_pre_drift "$DRIFT_SQL" || log "rescue_clients_bot_id_pre_drift: проблемы (см. выше), всё равно пробую apply_sql_lenient"
   apply_sql_lenient "$DRIFT_SQL"
   # Проверяем что drift реально устранён — если структурный остаток есть (CREATE
   # TABLE / ADD COLUMN), значит lenient apply упал на чём-то критичном, и идти в
