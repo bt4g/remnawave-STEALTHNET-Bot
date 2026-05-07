@@ -39,7 +39,8 @@ https://github.com/user-attachments/assets/4bcd85d6-ef26-4e92-99e9-85a57a17d9f4
 </p>
 
 <p align="center">
-https://github.com/user-attachments/assets/59a71a83-f182-4617-8cc1-ff12c14803ed
+  ![AdminMiniApp](https://github.com/user-attachments/assets/f23f41a1-b1e1-46f1-b671-6049f1b92819)
+
 </p>
 
 <p align="center">
