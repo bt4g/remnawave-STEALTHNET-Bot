@@ -1623,6 +1623,7 @@ const updateSettingsSchema = z.object({
   emailDomainBlocklist: z.string().max(10000).optional(),
   emailPatternBlocklist: z.string().max(10000).optional(),
   signupMaxPerIpPerHour: z.number().int().min(1).max(1000).optional(),
+  happCryptEnabled: z.boolean().optional(),
   useRemnaSubscriptionPage: z.boolean().optional(),
   aiChatEnabled: z.boolean().optional(),
   customBuildEnabled: z.boolean().optional(),
@@ -2384,6 +2385,14 @@ adminRouter.patch("/settings", async (req, res) => {
     await prisma.systemSetting.upsert({
       where: { key: "signup_max_per_ip_per_hour" },
       create: { key: "signup_max_per_ip_per_hour", value: val },
+      update: { value: val },
+    });
+  }
+  if (updates.happCryptEnabled !== undefined) {
+    const val = updates.happCryptEnabled ? "true" : "false";
+    await prisma.systemSetting.upsert({
+      where: { key: "happ_crypt_enabled" },
+      create: { key: "happ_crypt_enabled", value: val },
       update: { value: val },
     });
   }

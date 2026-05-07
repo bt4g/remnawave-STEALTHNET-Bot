@@ -150,6 +150,7 @@ const SYSTEM_CONFIG_KEYS = [
   "email_domain_blocklist", // Дополнительный список доменов через запятую (расширяет встроенный)
   "email_pattern_blocklist", // Regex-паттерны (по строке на каждый), блокируют локалпарт email
   "signup_max_per_ip_per_hour", // Сколько регистраций с одного IP в час разрешено (default: 3)
+  "happ_crypt_enabled", // Шифровать subscriptionUrl в happ://crypt4/... (по умолчанию false: ссылка длинная)
   "use_remna_subscription_page", // Кнопка VPN в боте ведёт на страницу подписки Remna вместо кабинета: true/false
   "ai_chat_enabled", // AI-чат в кабинете включён: true/false
   // Гибкий тариф (собери сам): цена за день, устройство, трафик или безлимит, сквад
@@ -580,6 +581,12 @@ export async function getSystemConfig() {
     emailPatternBlocklist: (map.email_pattern_blocklist ?? "").trim(),
     /** Лимит регистраций с одного IP в час (default 3) */
     signupMaxPerIpPerHour: Math.max(1, parseInt(map.signup_max_per_ip_per_hour ?? "3", 10) || 3),
+    /**
+     * Шифрование subscriptionUrl в happ://crypt4/...
+     * По умолчанию ВЫКЛ: crypt4-ссылки получаются 1500+ символов и в Telegram-сообщении выглядят как простыня.
+     * Включай только если очень нужно скрыть оригинальный URL подписки.
+     */
+    happCryptEnabled: (map.happ_crypt_enabled ?? "false").trim() === "true",
     useRemnaSubscriptionPage: map.use_remna_subscription_page === "true" || map.use_remna_subscription_page === "1",
     aiChatEnabled: map.ai_chat_enabled !== "false" && map.ai_chat_enabled !== "0",
     customBuildEnabled: map.custom_build_enabled === "true" || map.custom_build_enabled === "1",

@@ -2517,6 +2517,7 @@ export type UpdateSettingsPayload = {
   emailDomainBlocklist?: string;
   emailPatternBlocklist?: string;
   signupMaxPerIpPerHour?: number;
+  happCryptEnabled?: boolean;
   useRemnaSubscriptionPage?: boolean;
   aiChatEnabled?: boolean;
   customBuildEnabled?: boolean;
@@ -2913,6 +2914,8 @@ export interface AdminSettings {
   emailPatternBlocklist?: string;
   /** Макс. регистраций с одного IP в час */
   signupMaxPerIpPerHour?: number;
+  /** Шифровать subscriptionUrl в happ://crypt4/... (длинная ссылка, по умолчанию выкл) */
+  happCryptEnabled?: boolean;
   /** Кнопка VPN в боте ведёт на страницу подписки Remna */
   useRemnaSubscriptionPage?: boolean;
   /** AI-чат в кабинете включён */

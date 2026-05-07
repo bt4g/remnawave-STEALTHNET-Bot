@@ -3625,6 +3625,36 @@ export function SettingsPage() {
               </div>
               <CardContent className="space-y-5 p-4 sm:p-6">
 
+                {/* ───── Happ Crypto Link ───── */}
+                <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/5 via-purple-500/5 to-fuchsia-500/5 p-5 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                      <span className="text-sm">🔗</span>
+                    </div>
+                    <h3 className="text-base font-semibold">Happ Crypto Link</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Шифрует ссылки подписки в формат <code className="text-xs">happ://crypt4/...</code> через
+                    встроенный API Remnawave. <b>Скрывает оригинальный URL подписки</b> от пользователя.
+                    Минус: зашифрованная ссылка длиннее (~1500 символов) — в Telegram-сообщениях выглядит
+                    как простыня. Рекомендуется только если у вас публичная панель и важно скрыть домен подписки.
+                  </p>
+                  <label className="flex items-center gap-3 p-3.5 rounded-xl bg-card/40 border border-white/5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.happCryptEnabled === true}
+                      onChange={(e) => setSettings((s) => (s ? { ...s, happCryptEnabled: e.target.checked } : s))}
+                      className="rounded border w-4 h-4"
+                    />
+                    <div className="flex-1">
+                      <span className="text-sm font-medium">Шифровать ссылки подписки (Happ Crypto)</span>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        Выкл по умолчанию. После изменения нажмите «Сохранить» и подождите 60 сек (кэш бэкенда).
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
                 {/* ───── Антибот-защита регистраций ───── */}
                 <div className="rounded-2xl border border-red-500/20 bg-gradient-to-br from-red-500/5 via-amber-500/5 to-orange-500/5 p-5 space-y-4">
                   <div className="flex items-center gap-2.5">

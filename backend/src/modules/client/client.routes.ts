@@ -2100,9 +2100,12 @@ clientRouter.get("/subscription", async (req, res) => {
     return res.json({ subscription: null, tariffDisplayName: null, currentPricePerDay: null, message: result.error });
   }
 
-  // Шифрование subscriptionUrl через Happ Crypto (тот же механизм, что встроенная sub-page Remnawave).
-  // При недоступности эндпоинта Remna — оставляется оригинальная ссылка (см. encryptSubscriptionUrlInPlace).
-  await encryptSubscriptionUrlInPlace(result.data);
+  // Опциональное шифрование subscriptionUrl в happ://crypt4/... — настройка happCryptEnabled.
+  // По умолчанию выключено: crypt4-ссылка длинная (1500+ символов).
+  const subCfg = await getSystemConfig();
+  if (subCfg.happCryptEnabled) {
+    await encryptSubscriptionUrlInPlace(result.data);
+  }
 
   // Берём currentTariffId + currentPricePerDay (для UI отображения и для расчёта конвертации в warn-модалке)
   const dbClient = await prisma.client.findUnique({
@@ -2230,7 +2233,10 @@ clientRouter.get("/subscription/by-uuid/:uuid", async (req, res) => {
   if (result.error) {
     return res.json({ subscription: null, tariffDisplayName: null, message: result.error });
   }
-  await encryptSubscriptionUrlInPlace(result.data);
+  const subUuidCfg = await getSystemConfig();
+  if (subUuidCfg.happCryptEnabled) {
+    await encryptSubscriptionUrlInPlace(result.data);
+  }
   const tariffDisplayName = await resolveTariffDisplayName(result.data ?? null);
   return res.json({ subscription: result.data ?? null, tariffDisplayName });
 });
@@ -2242,6 +2248,8 @@ clientRouter.get("/subscription/by-uuid/:uuid", async (req, res) => {
 clientRouter.get("/subscription/all", async (req, res) => {
   const client = (req as unknown as { client: { id: string; remnawaveUuid: string | null } }).client;
   const clientId = (req as unknown as { clientId: string }).clientId;
+  const subAllCfg = await getSystemConfig();
+  const cryptOn = subAllCfg.happCryptEnabled;
 
   type SubInfo = {
     type: "root" | "secondary";
@@ -2257,7 +2265,7 @@ clientRouter.get("/subscription/all", async (req, res) => {
   // 1. Root подписка
   if (client.remnawaveUuid) {
     const rootResult = await remnaGetUser(client.remnawaveUuid);
-    await encryptSubscriptionUrlInPlace(rootResult.data);
+    if (cryptOn) await encryptSubscriptionUrlInPlace(rootResult.data);
     // Приоритет 1: currentTariffId из БД (Source of Truth)
     const dbClient = await prisma.client.findUnique({
       where: { id: clientId },
@@ -2306,7 +2314,7 @@ clientRouter.get("/subscription/all", async (req, res) => {
   for (const sec of secondaries) {
     if (!sec.remnawaveUuid) continue;
     const secResult = await remnaGetUser(sec.remnawaveUuid);
-    await encryptSubscriptionUrlInPlace(secResult.data);
+    if (cryptOn) await encryptSubscriptionUrlInPlace(secResult.data);
     const secTariff = sec.tariff?.name ?? await resolveTariffDisplayName(secResult.data ?? null);
     items.push({
       type: "secondary",
