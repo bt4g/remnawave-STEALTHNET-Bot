@@ -1,6 +1,5 @@
 
 
-https://github.com/user-attachments/assets/4bcd85d6-ef26-4e92-99e9-85a57a17d9f4
 
 <div align="center">
   <img src="https://cdn.jsdelivr.net/gh/hampusborgos/country-flags@main/svg/us.svg" alt="EN" width="20" /> EN
@@ -39,6 +38,8 @@ https://github.com/user-attachments/assets/4bcd85d6-ef26-4e92-99e9-85a57a17d9f4
 </p>
 
 <p align="center">
+<img width="1500" height="636" alt="AdminMiniApp 3" src="https://github.com/user-attachments/assets/81b8d321-3d0a-4d59-bec1-8f804ef5a5ba" />
+
 
 </p>
 
