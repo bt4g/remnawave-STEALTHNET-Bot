@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/4bcd85d6-ef26-4e92-99e9-85a57a17d9f4
+
 <div align="center">
   <img src="https://cdn.jsdelivr.net/gh/hampusborgos/country-flags@main/svg/us.svg" alt="EN" width="20" /> EN
   <a title="Russian" style="text-decoration: none;" href="docs/ru/README.md">
@@ -32,6 +36,10 @@
 
 <p align="center">
   <a href="https://t.me/stealthnet_admin_panel"><img src="https://img.shields.io/badge/Telegram-channel-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram" /></a>
+</p>
+
+<p align="center">
+https://github.com/user-attachments/assets/59a71a83-f182-4617-8cc1-ff12c14803ed
 </p>
 
 <p align="center">
