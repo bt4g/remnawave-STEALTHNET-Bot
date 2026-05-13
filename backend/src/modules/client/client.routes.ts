@@ -4425,17 +4425,34 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
     if (!isLavatopConfigured(lavatopConfig)) return res.status(503).json({ message: "Lava.top не настроена" });
 
     const client = await prisma.client.findUnique({ where: { id: clientId }, select: { email: true } });
-    // Lava.top требует валидный email. Если у клиента нет email (Telegram-only регистрация) —
-    // генерим синтетический на основе домена сервиса (config.publicAppUrl). `.local` TLD
-    // отклоняется как невалидный, поэтому используем реальный домен оператора.
-    let buyerEmail = (parsed.data.email?.trim()) || client?.email?.trim() || "";
-    if (!buyerEmail) {
+    // Lava.top требует валидный email. Если у клиента email отсутствует ИЛИ не проходит
+    // нашу валидацию — генерим синтетический на основе домена сервиса.
+    // Lava-валидатор отбивает: `.local`, без точки в TLD (`foo@bar`), пустую локалпарт,
+    // больше одного `@`, пробелы, и т.п. — отсюда более строгий regex чем "есть @".
+    const isValidEmail = (s: string): boolean => {
+      const t = s.trim();
+      if (!t || t.length > 254) return false;
+      // base RFC-light: local@domain.tld (tld >= 2 chars, без пробелов и спецсимволов)
+      if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(t)) return false;
+      // отдельно отрубаем reserved TLDs которые гарантированно не пройдут на стороне Lava
+      const tld = t.split(".").pop()!.toLowerCase();
+      if (["local", "localhost", "test", "invalid", "example"].includes(tld)) return false;
+      return true;
+    };
+
+    const rawEmail = (parsed.data.email?.trim()) || client?.email?.trim() || "";
+    let buyerEmail = rawEmail;
+    if (!buyerEmail || !isValidEmail(buyerEmail)) {
+      // Fallback: синтетический email на домене сервиса (или fallback-домене)
       let domain = "lavatop-receipts.io";
       try {
         const u = new URL(config.publicAppUrl || "https://lavatop-receipts.io");
         if (u.hostname && u.hostname.includes(".") && !u.hostname.endsWith(".local")) domain = u.hostname;
       } catch { /* keep default */ }
       buyerEmail = `client-${clientId}@${domain}`;
+      if (rawEmail) {
+        console.warn(`[lavatop] invalid client email "${rawEmail}", replaced with synthetic ${buyerEmail}`);
+      }
     }
 
     const { amount: amountBody, currency: currencyBody, tariffId: tariffIdBody, proxyTariffId: proxyTariffIdBody, singboxTariffId: singboxTariffIdBody, promoCode: promoCodeStr, extraOption, customBuild: customBuildBody, offerId: customOfferId } = parsed.data;
@@ -4590,12 +4607,39 @@ clientRouter.post("/lavatop/create-payment", async (req, res) => {
     const redirectUrl = appUrl ? `${appUrl}/cabinet?lavatop=success` : undefined;
     const failUrl = appUrl ? `${appUrl}/cabinet?lavatop=fail` : undefined;
 
-    // Для покупки тарифа используем подписку MONTHLY — Lava.top будет авто-списывать
-    // ежемесячно, и при каждом списании webhook продлит тариф у клиента (см. lavatop
-    // webhook handler: subscription.recurring.payment.success → activateTariffByPaymentId
-    // создаёт новый payment + extends subscription).
-    // Топ-ап баланса (без tariffId/proxyTariffId/etc) — разовая оплата ONE_TIME.
-    const periodicity: "ONE_TIME" | "MONTHLY" = lavatopIsTopup ? "ONE_TIME" : "MONTHLY";
+    // Маппим длительность тарифа на periodicity Lava. В Lava-оффере оператор включает
+    // несколько уровней (1мес/3мес/6мес/год) — мы должны явно сказать какой уровень
+    // выбран, иначе Lava возьмёт самый дешёвый (= "1 мес") и оплата уйдёт не за тот
+    // период (баг "выбрал 3 мес, а Lava предлагает 540 ₽").
+    //
+    // Допустимые значения: ONE_TIME | MONTHLY | PERIOD_90_DAYS | PERIOD_180_DAYS | PERIOD_YEAR.
+    // Топ-ап (без tariffId) запрещён выше — оставляем как fallback.
+    type LavaPeriod = "ONE_TIME" | "MONTHLY" | "PERIOD_90_DAYS" | "PERIOD_180_DAYS" | "PERIOD_YEAR";
+    let periodicity: LavaPeriod = "MONTHLY";
+    if (lavatopIsTopup) {
+      periodicity = "ONE_TIME";
+    } else if (tariffIdToStore) {
+      const t = await prisma.tariff.findUnique({
+        where: { id: tariffIdToStore },
+        select: { durationDays: true },
+      });
+      const d = t?.durationDays ?? 30;
+      // допуск ±5 дней (тарифы вида 28/30/31, 90/93, 180/186, 360/365)
+      if (d >= 350) periodicity = "PERIOD_YEAR";
+      else if (d >= 170 && d <= 200) periodicity = "PERIOD_180_DAYS";
+      else if (d >= 80 && d <= 100) periodicity = "PERIOD_90_DAYS";
+      else if (d >= 25 && d <= 35) periodicity = "MONTHLY";
+      else {
+        // нестандартная длительность (например 60 дней) — Lava такие не поддерживает
+        // для подписки. Берём ближайший разрешённый и ругаемся в лог.
+        if (d < 25) periodicity = "MONTHLY";
+        else if (d < 80) periodicity = "PERIOD_90_DAYS";
+        else if (d < 170) periodicity = "PERIOD_90_DAYS";
+        else if (d < 350) periodicity = "PERIOD_180_DAYS";
+        else periodicity = "PERIOD_YEAR";
+        console.warn(`[lavatop] non-standard durationDays=${d} → fallback periodicity=${periodicity}`);
+      }
+    }
 
     const result = await createLavatopInvoice({
       config: lavatopConfig,

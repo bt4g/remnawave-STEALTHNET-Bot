@@ -114,8 +114,13 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
   }
 
   // Идемпотентность: уже создали payment для этого contractId?
+  // Lava в recurring шлёт child UUID который мы сохраняем как orderId при первом приходе
+  // (но также может сохраняться в external_id если когда-то перекрёстно сохраняли).
   const alreadyProcessed = await prisma.payment.findFirst({
-    where: { orderId: childOrderId, provider: "lavatop" },
+    where: {
+      provider: "lavatop",
+      OR: [{ orderId: childOrderId }, { externalId: childOrderId }],
+    },
     select: { id: true, status: true },
   });
   if (alreadyProcessed) {
@@ -126,9 +131,14 @@ async function handleRecurringRenewal(event: LavatopWebhookEvent): Promise<void>
     return;
   }
 
-  // Находим исходный (parent) платёж — берём из него clientId, tariffId, botId
+  // Находим исходный (parent) платёж. Lava-собственный UUID parent'а лежит у нас в
+  // external_id; наш orderId (переданный как contractId в POST /api/v2/invoice) — в order_id.
+  // Ищем по обоим полям.
   const parent = await prisma.payment.findFirst({
-    where: { orderId: parentOrderId, provider: "lavatop" },
+    where: {
+      provider: "lavatop",
+      OR: [{ orderId: parentOrderId }, { externalId: parentOrderId }],
+    },
     select: {
       id: true,
       clientId: true,
@@ -256,19 +266,27 @@ lavatopWebhooksRouter.post("/", async (req: Request, res: Response) => {
   }
 
   // ─── Первый платёж (payment.success / SUBSCRIPTION_FIRST_INVOICE) ──
-  const orderId = event.contractId?.trim();
-  if (!orderId) {
+  const contractId = event.contractId?.trim();
+  if (!contractId) {
     console.warn("[Lava.top Webhook] нет contractId");
     return res.status(200).send("OK");
   }
 
+  // Lava.top в webhook'е шлёт СВОЙ UUID контракта (см. data.id из POST /api/v2/invoice),
+  // НЕ наш orderId который мы передавали как contractId. Lava-собственный UUID мы
+  // сохранили в payments.external_id при создании инвойса, наш UUID — в payments.order_id.
+  // Поэтому ищем по обоим полям, чтобы покрыть оба сценария (на случай если Lava когда-то
+  // начнёт возвращать наш orderId как раньше — старые инвойсы тоже найдутся).
   const payment = await prisma.payment.findFirst({
-    where: { orderId, provider: "lavatop" },
+    where: {
+      provider: "lavatop",
+      OR: [{ orderId: contractId }, { externalId: contractId }],
+    },
     select: { id: true, status: true, clientId: true, botId: true, amount: true, currency: true, tariffId: true, proxyTariffId: true, singboxTariffId: true, metadata: true },
   });
 
   if (!payment) {
-    console.warn("[Lava.top Webhook] payment не найден", { orderId });
+    console.warn("[Lava.top Webhook] payment не найден", { contractId });
     return res.status(200).send("OK");
   }
 
